@@ -422,3 +422,101 @@ def test_long_source_chunk_exact_line_provenance(client, base, checkout):
         params={"path": "src/long.py", "start_line": 1802, "end_line": 1802},
     ).json()
     assert source["content"] == "finalUpgradePolicy = 42"
+
+
+@pytest.mark.parametrize("style", ["spaced_id", "path", "path_lines", "wiki_id"])
+def test_wiki_accepts_verified_source_citation_formats(client, base, checkout, style):
+    repo = add_local(client, base, checkout)
+    doc = next(f for f in repo["files"] if f["path"] == "src/orders.py")["document_id"]
+    citations = {
+        "spaced_id": f"[资料： `{doc.upper()}` ]",
+        "path": "[资料:src/orders.py]",
+        "path_lines": "[资料:src/orders.py:L2-L3]",
+        "wiki_id": f"[[id:{doc}|订单源码]]",
+    }
+    model = ScriptedModel(
+        responses=[
+            call("read_code", {"document_id": doc, "start_line": 2, "end_line": 3}, "read"),
+            AIMessage(content="订单升级条件来自源码。" + citations[style]),
+        ]
+    )
+    asyncio.run(generate_wiki(client.app.state.store, client.app.state.settings, repo, model=model))
+    page = next(
+        f
+        for f in client.app.state.store.repository_files(repo["space_id"], repo["id"])
+        if f["kind"] == "ai_wiki"
+    )
+    content = client.get(base + "/documents/" + page["document_id"]).json()["content"]
+    assert f"[[id:{doc}|src/orders.py]]" in content
+
+
+def test_wiki_repairs_missing_citations_without_rereading(client, base, checkout):
+    repo = add_local(client, base, checkout)
+    doc = next(f for f in repo["files"] if f["path"] == "src/orders.py")["document_id"]
+    model = ScriptedModel(
+        responses=[
+            call("read_code", {"document_id": doc}, "read"),
+            AIMessage(content="订单版本低于2时升级。"),
+            AIMessage(content=f"订单版本低于2时升级。[资料:{doc}]"),
+        ]
+    )
+    asyncio.run(generate_wiki(client.app.state.store, client.app.state.settings, repo, model=model))
+    assert client.app.state.store.repository(repo["space_id"], repo["id"])["wiki_status"] == "ready"
+    assert model.i == 0  # Exactly three provider calls; no third generation attempt.
+
+
+def test_wiki_repair_can_read_code_and_denies_structure_wiki(client, base, checkout):
+    from kbagent.repository_wiki import RepositoryScope
+
+    repo = add_local(client, base, checkout)
+    store = client.app.state.store
+    doc = next(f for f in repo["files"] if f["path"] == "src/orders.py")["document_id"]
+    wiki = next(f for f in repo["files"] if f["kind"] == "wiki")["document_id"]
+    scope = RepositoryScope(store, repo)
+    assert scope.document(repo["space_id"], wiki) is None
+    assert all(h["repository"]["kind"] == "code" for h in scope.search(repo["space_id"], "订单"))
+    model = ScriptedModel(
+        responses=[
+            AIMessage(content="先给一版没有读取源码的说明"),
+            call("read_code", {"document_id": doc}, "read"),
+            AIMessage(content=f"升级实现。[资料:{doc}]"),
+        ]
+    )
+    asyncio.run(generate_wiki(store, client.app.state.settings, repo, model=model))
+    assert store.repository(repo["space_id"], repo["id"])["wiki_status"] == "ready"
+
+
+def test_wiki_unknown_reference_rejected_after_one_repair(client, base, checkout):
+    repo = add_local(client, base, checkout)
+    store = client.app.state.store
+    doc = next(f for f in repo["files"] if f["path"] == "src/orders.py")["document_id"]
+    other = store.create_space("其他代码库", "")
+    outside = store.save_document(other["id"], "外部资料", "其他实现")
+    model = ScriptedModel(
+        responses=[
+            call("read_code", {"document_id": doc}, "read"),
+            AIMessage(content=f"未读取的实现。[资料:{outside['id']}]"),
+            AIMessage(content="还是未知引用。[资料:nonexistent.py]"),
+        ]
+    )
+    with pytest.raises(RepositoryFailure, match="未读取的源码"):
+        asyncio.run(generate_wiki(store, client.app.state.settings, repo, model=model))
+    assert not any(
+        f["kind"] == "ai_wiki" for f in store.repository_files(repo["space_id"], repo["id"])
+    )
+
+
+def test_empty_source_reads_are_not_wiki_evidence(client, base, checkout):
+    repo = add_local(client, base, checkout)
+    doc = next(f for f in repo["files"] if f["path"] == "src/orders.py")["document_id"]
+    model = ScriptedModel(
+        responses=[
+            call("read_document", {"document_id": doc, "offset": 999999}, "empty"),
+            AIMessage(content=f"无源码内容。[资料:{doc}]"),
+            AIMessage(content=f"仍无源码内容。[资料:{doc}]"),
+        ]
+    )
+    with pytest.raises(RepositoryFailure, match="没有读取到有效源码"):
+        asyncio.run(
+            generate_wiki(client.app.state.store, client.app.state.settings, repo, model=model)
+        )

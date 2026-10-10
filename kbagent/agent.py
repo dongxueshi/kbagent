@@ -27,8 +27,17 @@ PROMPT = """你是 KB Agent 知识库助手，用中文回答。
 回答简洁，必要时列步骤。"""
 
 
-def build_agent(store: Store, space_id: str, settings: Settings, sources: dict, model=None):
+def build_agent(
+    store: Store,
+    space_id: str,
+    settings: Settings,
+    sources: dict,
+    model=None,
+    system_prompt: str = PROMPT,
+):
     def remember(hit: dict):
+        if not hit["content"].strip():
+            return
         sources[hit["document_id"]] = {
             "document_id": hit["document_id"],
             "title": hit["title"],
@@ -77,6 +86,7 @@ def build_agent(store: Store, space_id: str, settings: Settings, sources: dict, 
                 "content": body,
                 "offset": offset,
                 "has_more": offset + 6000 < len(document["content"]),
+                "repository": provenance,
             },
             ensure_ascii=False,
         )
@@ -155,14 +165,14 @@ def build_agent(store: Store, space_id: str, settings: Settings, sources: dict, 
     return create_deep_agent(
         model=model,
         tools=retrieval_tools,
-        system_prompt=PROMPT,
+        system_prompt=system_prompt,
         # StateBackend is virtual: agent file tools cannot read the host or .env.
         backend=StateBackend(),
         subagents=[
             {
                 "name": "knowledge-researcher",
                 "description": "检索多个知识库文档，比较资料并返回带文档 ID 的证据",
-                "system_prompt": PROMPT,
+                "system_prompt": system_prompt,
                 "tools": retrieval_tools,
             }
         ],
