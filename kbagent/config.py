@@ -26,6 +26,23 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 10 * 1024 * 1024
     agent_timeout: int = 120
 
+    gitlab_url: str = ""
+    gitlab_username: str = "oauth2"
+    gitlab_token: SecretStr = SecretStr("")
+    gitlab_ssl_ca: Path | None = None
+    repository_local_roots: list[Path] = []
+    repository_git_timeout: int = Field(default=120, ge=1, le=600)
+    repository_max_files: int = Field(default=500, ge=1, le=2000)
+    repository_max_file_bytes: int = Field(default=200000, ge=1, le=1000000)
+    repository_max_total_bytes: int = Field(default=10000000, ge=1, le=50000000)
+
+    @field_validator("repository_local_roots")
+    @classmethod
+    def valid_roots(cls, values):
+        if any(not p.is_absolute() for p in values):
+            raise ValueError("Repository local roots must be absolute paths")
+        return values
+
     @field_validator("mysql_database")
     @classmethod
     def valid_database(cls, value):

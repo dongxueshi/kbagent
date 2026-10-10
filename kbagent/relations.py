@@ -55,6 +55,11 @@ class LinkStore:
 
     @staticmethod
     def _index_links(db, document):
+        if db.execute(
+            "SELECT 1 FROM repository_documents WHERE document_id=? AND kind='code'",
+            (document["id"],),
+        ).fetchone():
+            return
         previous = defaultdict(deque)
         for row in db.execute(
             "SELECT * FROM document_links WHERE source_id=? ORDER BY `start`", (document["id"],)

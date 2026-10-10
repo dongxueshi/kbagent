@@ -15,11 +15,12 @@
 - DeepAgents 主智能体、知识检索子智能体、规划、检索/阅读/反向引用/关联查询工具，以及虚拟文件工作区。
 - 问答过程通过 SSE 显示工具执行进度，完成后返回答案和可点击的文档引用。
 - MySQL 持久化文档、关联、检索索引、会话和已完成的问答；MinIO 保存上传原件，支持下载；失败请求不会保存半个对话轮次。
+- DeepWiki 风格代码 Wiki：自建 GitLab / 已 clone 本地目录、按分支同步、结构 Wiki、AI 架构说明、带提交号与行号的源码引用。
 - 不配置模型时，返回明确标注的原文片段，不假冒 AI 答案。
 
 ## 本地启动
 
-要求 Python **3.12 或 3.13**、[uv](https://docs.astral.sh/uv/getting-started/installation/)，以及 Docker / Docker Compose（或已有的 MySQL 5.7+ 和 MinIO 服务）。Node 仅用于 JavaScript 语法检查。
+要求 Git、Python **3.12 或 3.13**、[uv](https://docs.astral.sh/uv/getting-started/installation/)，以及 Docker / Docker Compose（或已有的 MySQL 5.7+ 和 MinIO 服务）。Node 仅用于 JavaScript 语法检查。
 
 ```bash
 bash scripts/setup.sh
@@ -100,6 +101,36 @@ KBAGENT_BASE_URL=https://api.openai.com/v1
 
 智能体可以调用 `get_backlinks` / `get_related_documents` 沿链接寻找上下文。关联列表不是内容证据，智能体仍需阅读原文才能给出相关文档引用。
 
+## 代码仓库 Wiki
+
+在 `.env` 配置并重启，再进入「代码 Wiki」添加仓库：
+
+```dotenv
+# 内网 / 自建 GitLab 的 HTTP(S) 地址，支持根路径，例如 https://gitlab.example.com
+KBAGENT_GITLAB_URL=https://gitlab.example.com
+KBAGENT_GITLAB_USERNAME=oauth2
+KBAGENT_GITLAB_TOKEN=具有read_repository权限的只读Token
+# 自签证书使用受信 CA；不关闭 TLS 校验
+# KBAGENT_GITLAB_SSL_CA=/path/to/gitlab-ca.pem
+
+# 服务进程所在机器上的允许目录，用 JSON 数组配置
+KBAGENT_REPOSITORY_LOCAL_ROOTS=["/srv/repos","/Users/me/projects"]
+```
+
+GitLab 来源填写 `https://gitlab.example.com/team/service.git`，支持多层 subgroup。只能连接配置的 GitLab 地址；Token 通过临时 Git askpass 的子进程环境提供，不写入数据库、仓库 URL 或命令参数。项目 Token 如要求专用用户名，可修改 `KBAGENT_GITLAB_USERNAME`。当前支持 HTTP(S) Git 拉取；不使用 GitLab API，不支持 SSH 地址。
+
+本地来源填写已经 clone 的仓库根目录，如 `/srv/repos/service`。这是**服务器文件系统上的路径**；浏览器所在电脑的路径仅在服务也运行于该电脑时有效。允许范围外的目录与子目录入口会被拒绝；符号链接会先解析真实路径。分支留空时使用默认 HEAD，填入分支名时导入该分支已提交的内容。未提交修改、不受 Git 跟踪的文件和子模块不会进入索引。
+
+添加后后台同步，页面显示进度、错误、提交号、导入和跳过的文件数。「同步」重新读取配置的分支。同步成功后自动生成仓库概览、按顶层目录划分的模块页，以及 Python 类/函数行号索引；页面明确标注为**结构 Wiki，非 AI 分析**。源码和生成的 Wiki 由仓库任务管理，不能当普通文档编辑或删除；修改代码并提交后重新同步。
+
+点击「打开 Wiki」可阅读 Wiki 页面、筛选文件和按行号查看源码。普通问答也可检索这些代码；DeepAgents 增加 `search_code`、`list_repository_files`、`read_code` 工具。检索支持中文与 camelCase / snake_case 拆词。代码引用保留仓库、提交号、快照、路径与行号，点击后读取对应版本；新同步不会覆盖旧源码快照。删除仓库或知识库会删除其历史快照，因此引用随后失效。
+
+配置模型后可点击「生成 AI Wiki」，通过真正的 DeepAgents 图阅读源码、生成架构与关键流程说明。生成工具限制在选定仓库，必须包含本次访问的有效源码引用才能保存。AI 说明需要通过引用核对；新代码同步后移除旧 AI 页面，需重新生成。实际模型服务与用户 GitLab 尚需用户配置；测试使用本地认证 Git HTTP 服务和确定性模型，未连接你的内网仓库或真实模型。
+
+默认单文件最多 200,000 字节、500 个文件、文本总量 10 MB；可在 `.env` 修改 `KBAGENT_REPOSITORY_MAX_FILE_BYTES`、`KBAGENT_REPOSITORY_MAX_FILES` 和 `KBAGENT_REPOSITORY_MAX_TOTAL_BYTES`。跳过常见依赖/生成目录、锁文件、二进制、无效 UTF-8、符号链接、`.env*`、私钥文件与私钥 PEM 内容。这是有限的文件过滤，不是通用秘密扫描；代码中硬编码的密码仍可能进入索引并在启用模型时发送给模型服务。
+
+此版采用浅克隆、全量刷新索引和手动同步，无自动 GitLab webhook、定时拉取、完整跨语言调用图或增量分析。浅克隆的数据传输大小不受导入文本上限约束；大仓库优先使用已有本地 clone。Git 单次命令超时默认 120 秒；服务进程需可访问内网 GitLab。任务状态保存在 MySQL，服务重启后中断任务会标为失败，可手动重试，等待中的任务会继续。当前使用单服务进程的串行仓库 worker，请不要启动多实例共享同一数据库处理任务。
+
 ## 验证
 
 ```bash
@@ -113,7 +144,7 @@ make browser
 
 `KBAGENT_TEST_MYSQL_DATABASE` 默认 `kbagent_test`，必须与应用数据库不同且以 `_test` 结尾。测试会清空该测试数据库，并创建、删除独立的临时 bucket；外部服务用户需自行创建测试库并授权。
 
-测试使用真实 MySQL 和 MinIO，覆盖原件上传/下载/删除、清理重试、写入失败回滚、SQLite 迁移，以及 CRUD、中文检索、索引更新/清理、知识库隔离、四种文件格式、大小/格式错误、SSE、会话持久化、重启、链接解析/迁移/重命名/删除修复/同名选择、图谱遍历、真实 DeepAgents 图的工具调用、引用校验和服务端文件隔离。浏览器检查还覆盖长回答滚动与输入框可见性、实时/历史回答 Markdown、安全渲染、桌面短窗口和手机布局，以及自动补全、标题跳转、引用侧栏、实际图谱节点点击、关联创建、两层图谱和手机布局。
+测试使用真实 MySQL 和 MinIO，覆盖原件上传/下载/删除、清理重试、写入失败回滚、SQLite 迁移，以及 CRUD、中文检索、索引更新/清理、知识库隔离、四种文件格式、大小/格式错误、SSE、会话持久化、重启、链接解析/迁移/重命名/删除修复/同名选择、图谱遍历、真实 DeepAgents 图的工具调用、引用校验和服务端文件隔离。代码仓库测试覆盖真实本地 Git、HTTP Basic 认证拉取、分支选择、文件过滤、事务回滚、历史快照、源码引用、只读保护和 DeepAgents Wiki 生成。浏览器检查还覆盖仓库添加/同步、Wiki 阅读、源码行号、问答源码引用，以及长回答滚动与输入框可见性、实时/历史回答 Markdown、安全渲染、桌面短窗口和手机布局，以及自动补全、标题跳转、引用侧栏、实际图谱节点点击、关联创建、两层图谱和手机布局。
 
 SDK 测试使用确定性模型测试替身驱动**真实 DeepAgents 图**，无需外部密钥；这不代表真实模型服务已连通。测试与浏览器脚本使用独立的 `_test` 数据库和临时 MinIO bucket，结束后清理测试数据；请勿并行运行这两项。
 

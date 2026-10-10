@@ -11,6 +11,7 @@ import jieba
 from .config import Settings
 from .database import transaction
 from .relations import LinkStore
+from .repository_store import RepositoryStore
 from .schema import initialize_schema
 
 jieba.setLogLevel(30)
@@ -24,11 +25,14 @@ STOP_WORDS = set("的 了 是 我 你 他 她 它 和 与 或 在 有 吗 呢 �
 
 
 def tokenize(text: str) -> list[str]:
-    return [
-        word.lower()
-        for word in jieba.cut_for_search(text)
-        if re.search(r"[\w\u4e00-\u9fff]", word) and word.strip() not in STOP_WORDS
-    ]
+    result = []
+    for word in jieba.cut_for_search(text):
+        if re.search(r"[\w\u4e00-\u9fff]", word) and word.strip() not in STOP_WORDS:
+            result.append(word.lower())
+            parts = re.split(r"_+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", word)
+            if len(parts) > 1:
+                result.extend(part.lower() for part in parts if part)
+    return result
 
 
 def chunks(text: str, size: int = 900, overlap: int = 120) -> list[str]:
@@ -39,7 +43,7 @@ def chunks(text: str, size: int = 900, overlap: int = 120) -> list[str]:
     ]
 
 
-class Store(LinkStore):
+class Store(LinkStore, RepositoryStore):
     def __init__(self, settings: Settings):
         self.settings = settings
 
@@ -76,6 +80,7 @@ class Store(LinkStore):
     def delete_space(self, space_id: str):
         with self.connection() as db:
             self._queue_space_files(db, space_id)
+            self._queue_repository_snapshots(db, space_id)
             db.execute("DELETE FROM spaces WHERE id=?", (space_id,))
 
     def documents(self, space_id: str) -> list[dict]:
@@ -87,8 +92,13 @@ class Store(LinkStore):
                 (space_id,),
             ):
                 aliases.setdefault(row["document_id"], []).append(row["name"])
+            repository_sources = self._repository_sources(db, space_id)
             return [
-                dict(r, aliases=aliases.get(r["id"], []))
+                dict(
+                    r,
+                    aliases=aliases.get(r["id"], []),
+                    repository=repository_sources.get(r["id"]),
+                )
                 for r in db.execute(
                     """
                 SELECT id, space_id, title, source, created_at, updated_at,
@@ -114,6 +124,7 @@ class Store(LinkStore):
             return dict(
                 r,
                 original_file=dict(original) if original else None,
+                repository=self._repository_source(db, document_id),
                 aliases=[
                     row[0]
                     for row in db.execute(
@@ -133,6 +144,8 @@ class Store(LinkStore):
         aliases: list[str] | None = None,
         original_file: dict | None = None,
     ) -> dict:
+        if document_id and self.repository_document_source(space_id, document_id):
+            raise ValueError("仓库文档由同步管理，请修改代码并重新同步")
         stamp = now()
         item = dict(
             id=document_id or uuid4().hex,
@@ -241,7 +254,14 @@ class Store(LinkStore):
             db.execute("DELETE FROM documents WHERE id=? AND space_id=?", (document_id, space_id))
             self._resolve_pending(db, space_id)
 
-    def search(self, space_id: str, query: str, limit: int = 6) -> list[dict]:
+    def search(
+        self,
+        space_id: str,
+        query: str,
+        limit: int = 6,
+        repository_id: str | None = None,
+        code_only: bool = False,
+    ) -> list[dict]:
         terms = [term for term in dict.fromkeys(tokenize(query)) if len(term) <= 200][:32]
         if not terms:
             return []
@@ -267,6 +287,10 @@ class Store(LinkStore):
                 JOIN (SELECT term,count(*) df FROM chunk_terms
                     WHERE space_id=? AND term IN ({slots}) GROUP BY term) freq ON freq.term=t.term
                 WHERE t.space_id=? AND d.space_id=? AND t.term IN ({slots})
+                AND (? IS NULL OR EXISTS (SELECT 1 FROM repository_documents rd
+                    WHERE rd.document_id=d.id AND rd.repository_id=?))
+                AND (?=0 OR EXISTS (SELECT 1 FROM repository_documents rd
+                    WHERE rd.document_id=d.id AND rd.kind='code'))
                 GROUP BY c.id,d.id ORDER BY `rank`,c.id LIMIT ?""",
                 (
                     stats["n"],
@@ -276,10 +300,31 @@ class Store(LinkStore):
                     space_id,
                     space_id,
                     *terms,
+                    repository_id,
+                    repository_id,
+                    int(code_only),
                     limit,
                 ),
             ).fetchall()
-            return [dict(row) for row in rows]
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["repository"] = self._repository_source(db, row["document_id"])
+                if item["repository"] and item["repository"]["kind"] == "code":
+                    content = db.execute(
+                        "SELECT content FROM documents WHERE id=?", (row["document_id"],)
+                    ).fetchone()[0]
+                    offsets = [
+                        i for i in range(0, len(content), 780) if content[i : i + 900].strip()
+                    ]
+                    offset = offsets[row["position"]]
+                    item["repository"]["start_line"] = content[:offset].count("\n") + 1
+                    item["repository"]["end_line"] = min(
+                        item["repository"]["line_count"],
+                        content[: offset + len(row["content"])].count("\n") + 1,
+                    )
+                result.append(item)
+            return result
 
     def original_file(self, space_id, document_id):
         with self.connection() as db:
@@ -303,8 +348,9 @@ class Store(LinkStore):
             db.execute(
                 """UPDATE object_deletions SET not_before=UTC_TIMESTAMP(6)
                 WHERE object_key=? AND NOT EXISTS
-                (SELECT 1 FROM original_files WHERE object_key=?)""",
-                (key, key),
+                (SELECT 1 FROM original_files WHERE object_key=?)
+                AND NOT EXISTS (SELECT 1 FROM repository_snapshots WHERE object_key=?)""",
+                (key, key, key),
             )
 
     def pending_deletions(self, limit=100):
@@ -315,6 +361,8 @@ class Store(LinkStore):
                     """SELECT q.object_key
                 FROM object_deletions q WHERE q.not_before<=UTC_TIMESTAMP(6)
                 AND NOT EXISTS (SELECT 1 FROM original_files f WHERE f.object_key=q.object_key)
+                AND NOT EXISTS (SELECT 1 FROM repository_snapshots s
+                    WHERE s.object_key=q.object_key)
                 ORDER BY q.not_before LIMIT ?""",
                     (limit,),
                 )

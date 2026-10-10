@@ -11,6 +11,7 @@ from pathlib import Path
 
 from chat_browser_checks import check_chat
 from playwright.sync_api import expect, sync_playwright
+from repository_browser_checks import check_repositories
 from test_storage import isolated_storage
 from wiki_browser_checks import check_wiki
 
@@ -24,7 +25,36 @@ def run():
         port = sock.getsockname()[1]
     env = dict(os.environ, KBAGENT_API_KEY="", KBAGENT_MODEL="", KBAGENT_PORT=str(port))
     OUTPUT.mkdir(exist_ok=True)
-    with isolated_storage() as settings:
+    with (
+        tempfile.TemporaryDirectory(prefix="kbagent-browser-repo-") as repository_root,
+        isolated_storage() as settings,
+    ):
+        checkout = Path(repository_root) / "service"
+        checkout.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main", str(checkout)], check=True, capture_output=True
+        )
+        (checkout / "orders.py").write_text(
+            "# 订单升级策略\ndef forceUpgrade(order):\n    return order['version'] < 2\n"
+        )
+        subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(checkout),
+                "-c",
+                "user.name=Browser",
+                "-c",
+                "user.email=browser@example.invalid",
+                "commit",
+                "-m",
+                "Fixture",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        env["KBAGENT_REPOSITORY_LOCAL_ROOTS"] = __import__("json").dumps([repository_root])
         env["KBAGENT_MYSQL_DATABASE"] = settings.mysql_database
         env["KBAGENT_MINIO_BUCKET"] = settings.minio_bucket
         with tempfile.TemporaryFile(mode="w+") as logs:
@@ -140,6 +170,7 @@ def run():
                     page.screenshot(path=OUTPUT / "mobile.png", full_page=True)
                     check_chat(page, url, OUTPUT)
                     check_wiki(page, url, OUTPUT)
+                    check_repositories(page, checkout, OUTPUT)
                     assert not errors, errors
                     browser.close()
                     print(

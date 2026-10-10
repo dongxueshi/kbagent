@@ -17,6 +17,7 @@ from .store import Store
 PROMPT = """你是 KB Agent 知识库助手，用中文回答。
 针对复杂问题先规划，必要时交给 knowledge-researcher 子智能体调查。
 必须先调用 search_knowledge 检索资料；需要上下文时调用 read_document。
+代码问题可用 search_code、list_repository_files、read_code 查看源码和行号。
 可用 get_backlinks 查反向引用，用 get_related_documents 沿双向链接探索上下文。
 关联列表只证明文档之间有链接，不代表其内容已核实；引用相关文档前必须读取原文。
 只依据本次实际检索或阅读的知识库资料作答。引用格式为 [资料:文档ID]。
@@ -28,14 +29,12 @@ PROMPT = """你是 KB Agent 知识库助手，用中文回答。
 
 def build_agent(store: Store, space_id: str, settings: Settings, sources: dict, model=None):
     def remember(hit: dict):
-        sources.setdefault(
-            hit["document_id"],
-            {
-                "document_id": hit["document_id"],
-                "title": hit["title"],
-                "excerpt": hit["content"][:500],
-            },
-        )
+        sources[hit["document_id"]] = {
+            "document_id": hit["document_id"],
+            "title": hit["title"],
+            "excerpt": hit["content"][:500],
+            "repository": hit.get("repository"),
+        }
 
     @tool
     def search_knowledge(query: str) -> str:
@@ -53,7 +52,24 @@ def build_agent(store: Store, space_id: str, settings: Settings, sources: dict, 
             return "文档不存在或不属于当前知识库"
         offset = max(0, offset)
         body = document["content"][offset : offset + 6000]
-        remember({"document_id": document_id, "title": document["title"], "content": body})
+        provenance = document.get("repository")
+        if provenance and provenance["kind"] == "code":
+            provenance = dict(
+                provenance,
+                start_line=document["content"][:offset].count("\n") + 1,
+                end_line=min(
+                    provenance["line_count"],
+                    document["content"][: offset + len(body)].count("\n") + 1,
+                ),
+            )
+        remember(
+            {
+                "document_id": document_id,
+                "title": document["title"],
+                "content": body,
+                "repository": provenance,
+            }
+        )
         return json.dumps(
             {
                 "document_id": document_id,
@@ -84,6 +100,39 @@ def build_agent(store: Store, space_id: str, settings: Settings, sources: dict, 
             return "文档不存在或不属于当前知识库"
         return json.dumps(result, ensure_ascii=False)
 
+    @tool
+    def list_repository_files(repository_id: str) -> str:
+        """List current repository files in this knowledge base. Metadata is not evidence."""
+        return json.dumps(store.repository_files(space_id, repository_id), ensure_ascii=False)
+
+    @tool
+    def search_code(query: str, repository_id: str = "") -> str:
+        """Search committed source code; returns paths, commit SHA, line ranges and evidence."""
+        hits = store.search(space_id, query, 10, repository_id or None, True)
+        for hit in hits:
+            remember(hit)
+        return json.dumps(hits, ensure_ascii=False)
+
+    @tool
+    def read_code(document_id: str, start_line: int = 1, end_line: int = 150) -> str:
+        """Read up to 300 source lines from a current-base code document."""
+        doc = store.document(space_id, document_id)
+        if not doc or not doc.get("repository") or doc["repository"]["kind"] != "code":
+            return "源码不存在或不属于当前知识库"
+        start_line = max(1, start_line)
+        lines = doc["content"].splitlines()
+        end_line = min(max(start_line, end_line), start_line + 299, len(lines))
+        body = "\n".join(lines[start_line - 1 : end_line])
+        hit = dict(
+            document_id=document_id,
+            title=doc["title"],
+            content=body,
+            repository=dict(doc["repository"], start_line=start_line, end_line=end_line),
+        )
+        if body:
+            remember(hit)
+        return json.dumps(hit, ensure_ascii=False)
+
     if model is None:
         model = ChatOpenAI(
             model=settings.model,
@@ -94,7 +143,15 @@ def build_agent(store: Store, space_id: str, settings: Settings, sources: dict, 
             max_retries=1,
             use_responses_api=False,
         )
-    retrieval_tools = [search_knowledge, read_document, get_backlinks, get_related_documents]
+    retrieval_tools = [
+        search_knowledge,
+        read_document,
+        get_backlinks,
+        get_related_documents,
+        list_repository_files,
+        search_code,
+        read_code,
+    ]
     return create_deep_agent(
         model=model,
         tools=retrieval_tools,
@@ -140,6 +197,7 @@ async def answer_events(
                         "document_id": hit["document_id"],
                         "title": hit["title"],
                         "excerpt": hit["content"][:500],
+                        "repository": hit.get("repository"),
                     }
                 )
         if sources:

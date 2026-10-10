@@ -10,3 +10,20 @@
 .message-text.markdown h2{font-size:17px}
 .message-text.markdown h3{font-size:15px}
 .markdown code{background:#f4f1f9;border-radius:4px;padding:2px 5px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+
+.repository-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:20px}
+.repository-card {padding:24px;min-width:0}
+.repository-card h2 {margin-top:0}
+.repository-path {overflow-wrap:anywhere;font-size:12px}
+.repository-error {color:#ac263d;overflow-wrap:anywhere}
+.repository-card .actions,.repository-wiki {display:flex;flex-wrap:wrap;gap:8px}
+.repository-filter {width:100%;padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:12px}
+.repository-file-list {max-height:45vh;overflow:auto}
+.repository-file-list .doc-row {gap:12px}
+.repository-file-list strong {overflow-wrap:anywhere;text-align:left;flex:1;min-width:0}
+.source-code {overflow:auto;max-height:55vh;background:#f6f7fb;border:1px solid var(--border);border-radius:8px;font:13px/1.7 monospace}
+.source-line {display:flex;min-width:max-content}
+.source-line span {position:sticky;left:0;min-width:55px;padding:0 10px;text-align:right;color:#8a8fa3;background:#eef0f7;user-select:none}
+.source-line code {white-space:pre;padding:0 12px}
+.source-pagination {margin-top:16px}
+@media(max-width:700px) {.sidebar nav {flex-wrap:wrap}.repository-card {padding:16px}}

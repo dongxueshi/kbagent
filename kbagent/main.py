@@ -18,6 +18,7 @@ from .agent import answer_events, event_error
 from .config import Settings
 from .importer import ImportFailure, extract_text
 from .object_storage import ObjectStorage
+from .repositories import RepositoryFailure, RepositoryService
 from .store import Store
 
 STATIC = Path(__file__).parent / "static"
@@ -69,6 +70,18 @@ class QuestionInput(BaseModel):
         return v.strip()
 
 
+class RepositoryInput(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    kind: str = Field(pattern="^(gitlab|local)$")
+    source: str = Field(min_length=1, max_length=1024)
+    ref: str = Field(default="", max_length=200)
+
+    @field_validator("name", "source", "ref")
+    @classmethod
+    def stripped(cls, value):
+        return value.strip()
+
+
 class LinkBinding(BaseModel):
     target_id: str = Field(min_length=1, max_length=64)
 
@@ -77,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     store = Store(settings)
     objects = ObjectStorage(settings)
+    repositories = RepositoryService(store, objects, settings)
     active_conversations: set[str] = set()
     agent_slots = asyncio.Semaphore(4)
 
@@ -93,10 +107,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     logger.warning("Storage cleanup deferred (%s)", type(exc).__name__)
                 await asyncio.sleep(60)
 
+        await asyncio.to_thread(store.recover_repository_jobs)
+        repository_worker = asyncio.create_task(repositories.worker())
         worker = asyncio.create_task(cleanup())
         try:
             yield
         finally:
+            repositories.stopping = True
+            # Drain the active Git job rather than leaving a thread writing after shutdown.
+            await repository_worker
             worker.cancel()
             try:
                 await worker
@@ -107,6 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.objects = objects
     app.state.store = store
     app.state.settings = settings
+    app.state.repositories = repositories
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     async def storage_error(request, exc):
@@ -168,6 +188,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         require_space(space_id)
         if active_conversations:
             raise HTTPException(409, "问答正在运行，请完成后再删除知识库")
+        if any(
+            r["sync_status"] in {"queued", "running"} or r["wiki_status"] in {"queued", "running"}
+            for r in store.repositories(space_id)
+        ):
+            raise HTTPException(409, "请等待代码仓库任务完成后再删除知识库")
         store.delete_space(space_id)
         objects.collect(store)
 
@@ -187,7 +212,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.put("/api/spaces/{space_id}/documents/{document_id}")
     def update_document(space_id: str, document_id: str, body: DocumentInput):
-        require_document(space_id, document_id)
+        if require_document(space_id, document_id).get("repository"):
+            raise HTTPException(409, "仓库文档由同步管理，请修改代码并重新同步")
         return store.save_document(
             space_id, body.title, body.content, document_id=document_id, aliases=body.aliases
         )
@@ -208,6 +234,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.put("/api/spaces/{space_id}/documents/{document_id}/links/{link_id}")
     def bind_link(space_id: str, document_id: str, link_id: int, body: LinkBinding):
+        if require_document(space_id, document_id).get("repository"):
+            raise HTTPException(409, "仓库 Wiki 链接由生成任务管理")
         try:
             store.bind_link(space_id, document_id, link_id, body.target_id)
         except KeyError as exc:
@@ -216,7 +244,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.delete("/api/spaces/{space_id}/documents/{document_id}", status_code=204)
     def delete_document(space_id: str, document_id: str):
-        require_document(space_id, document_id)
+        if require_document(space_id, document_id).get("repository"):
+            raise HTTPException(409, "请在代码 Wiki 页面删除仓库，或修改代码并重新同步")
         store.delete_document(space_id, document_id)
         objects.collect(store)
 
@@ -278,6 +307,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def search(space_id: str, q: str = Query(min_length=1, max_length=500)):
         require_space(space_id)
         return store.search(space_id, q, 12)
+
+    def require_repository(space_id, repository_id):
+        repo = store.repository(space_id, repository_id)
+        if not repo:
+            raise HTTPException(404, "仓库不存在")
+        return repo
+
+    @app.get("/api/repository-settings")
+    def repository_settings():
+        return {
+            "gitlab_configured": bool(settings.gitlab_url),
+            "local_configured": bool(settings.repository_local_roots),
+            "max_files": settings.repository_max_files,
+        }
+
+    @app.get("/api/spaces/{space_id}/repositories")
+    def list_repositories(space_id: str):
+        require_space(space_id)
+        return store.repositories(space_id)
+
+    @app.post("/api/spaces/{space_id}/repositories", status_code=201)
+    def add_repository(space_id: str, body: RepositoryInput):
+        require_space(space_id)
+        if not body.name:
+            raise HTTPException(422, "名称不能为空")
+        try:
+            source = repositories.git.validate(body.kind, body.source, body.ref)
+        except (RepositoryFailure, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+        repo = store.create_repository(space_id, body.name, body.kind, source, body.ref)
+        store.enqueue_repository(space_id, repo["id"], "sync")
+        return store.repository(space_id, repo["id"])
+
+    @app.get("/api/spaces/{space_id}/repositories/{repository_id}")
+    def get_repository(space_id: str, repository_id: str):
+        repo = require_repository(space_id, repository_id)
+        return dict(repo, files=store.repository_files(space_id, repository_id))
+
+    @app.post("/api/spaces/{space_id}/repositories/{repository_id}/{job}", status_code=202)
+    def repository_job(space_id: str, repository_id: str, job: str):
+        require_repository(space_id, repository_id)
+        if job not in {"sync", "wiki"}:
+            raise HTTPException(404, "任务不存在")
+        if job == "wiki" and not settings.agent_enabled:
+            raise HTTPException(422, "请先在 .env 配置模型服务；同步会自动生成结构 Wiki")
+        try:
+            store.enqueue_repository(space_id, repository_id, job)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"status": "queued"}
+
+    @app.get("/api/spaces/{space_id}/repositories/{repository_id}/source")
+    def repository_source(
+        space_id: str,
+        repository_id: str,
+        path: str = Query(max_length=512),
+        snapshot_id: str | None = None,
+        start_line: int = Query(default=1, ge=1),
+        end_line: int = Query(default=200, ge=1),
+    ):
+        require_repository(space_id, repository_id)
+        if end_line < start_line:
+            raise HTTPException(422, "结束行不得小于开始行")
+        try:
+            return repositories.source(
+                space_id, repository_id, path, snapshot_id, start_line, end_line
+            )
+        except KeyError as exc:
+            raise HTTPException(404, exc.args[0]) from exc
+
+    @app.delete("/api/spaces/{space_id}/repositories/{repository_id}", status_code=204)
+    def remove_repository(space_id: str, repository_id: str):
+        require_repository(space_id, repository_id)
+        try:
+            store.delete_repository(space_id, repository_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        objects.collect(store)
 
     @app.get("/api/spaces/{space_id}/conversations")
     def conversations(space_id: str):

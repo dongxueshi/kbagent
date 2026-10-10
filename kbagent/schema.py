@@ -78,6 +78,32 @@ TABLES = [
     """CREATE TABLE IF NOT EXISTS object_deletions (
         object_key VARCHAR(512) PRIMARY KEY, not_before DATETIME(6) NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS repositories (
+        id VARCHAR(32) PRIMARY KEY, space_id VARCHAR(32) NOT NULL, name VARCHAR(100) NOT NULL,
+        kind VARCHAR(16) NOT NULL, source VARCHAR(1024) NOT NULL, ref VARCHAR(200) NOT NULL,
+        sync_status VARCHAR(16) NOT NULL, wiki_status VARCHAR(16) NOT NULL,
+        error VARCHAR(500) NOT NULL, wiki_error VARCHAR(500) NOT NULL,
+        snapshot_id VARCHAR(32), commit_sha CHAR(40), file_count INT NOT NULL DEFAULT 0,
+        skipped_count INT NOT NULL DEFAULT 0, created_at VARCHAR(40) NOT NULL,
+        updated_at VARCHAR(40) NOT NULL, INDEX repositories_space (space_id),
+        FOREIGN KEY (space_id) REFERENCES spaces(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS repository_snapshots (
+        id VARCHAR(32) PRIMARY KEY, repository_id VARCHAR(32) NOT NULL,
+        commit_sha CHAR(40) NOT NULL,
+        object_key VARCHAR(512) NOT NULL UNIQUE, file_count INT NOT NULL,
+        content_bytes BIGINT NOT NULL, created_at VARCHAR(40) NOT NULL,
+        INDEX snapshots_repository (repository_id),
+        FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS repository_documents (
+        document_id VARCHAR(32) PRIMARY KEY, repository_id VARCHAR(32) NOT NULL,
+        kind VARCHAR(16) NOT NULL, path VARCHAR(512) NOT NULL, snapshot_id VARCHAR(32),
+        line_count INT NOT NULL, UNIQUE KEY repository_path (repository_id,kind,path),
+        FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+        FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE,
+        FOREIGN KEY (snapshot_id) REFERENCES repository_snapshots(id) ON DELETE SET NULL
+    )""",
 ]
 
 
