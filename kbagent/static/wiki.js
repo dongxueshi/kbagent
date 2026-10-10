@@ -7,6 +7,19 @@ window.KBLinks = (() => {
     if (graph) { graph.destroy(); graph = null; }
   }
 
+  function appendInline(target, text) {
+    const pattern = /(`+)([^`]+)\1|\*\*([^*]+)\*\*/g;
+    let offset = 0;
+    for (const match of text.matchAll(pattern)) {
+      target.append(document.createTextNode(text.slice(offset, match.index)));
+      const element = document.createElement(match[3] === undefined ? 'code' : 'strong');
+      element.textContent = match[3] === undefined ? match[2] : match[3];
+      target.append(element);
+      offset = match.index + match[0].length;
+    }
+    target.append(document.createTextNode(text.slice(offset)));
+  }
+
   function renderMarkdown(text, target, links = []) {
     target.replaceChildren();
     let code = null;
@@ -22,7 +35,7 @@ window.KBLinks = (() => {
         } else { code.textContent += line + '\n'; }
       } else if (mark) {
         fence = mark[1]; code = document.createElement('pre');
-      } else {
+      } else if (line.trim()) {
         const heading = line.match(/^(#{1,6})\s+(.*)/);
         const quote = line.startsWith('> ');
         const el = document.createElement(heading ? 'h' + heading[1].length : quote ? 'blockquote' : 'p');
@@ -33,7 +46,7 @@ window.KBLinks = (() => {
         for (let i = prefix; i < chars.length;) {
           const link = linksByStart.get(offset + i);
           if (link && link.end <= offset + chars.length) {
-            if (plain) { el.append(document.createTextNode(plain)); plain = ''; }
+            if (plain) { appendInline(el, plain); plain = ''; }
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'wiki-link ' + link.status;
@@ -47,7 +60,7 @@ window.KBLinks = (() => {
             i = link.end - offset;
           } else { plain += chars[i++]; }
         }
-        if (plain) el.append(document.createTextNode(plain));
+        if (plain) appendInline(el, plain);
         target.append(el);
       }
       offset += chars.length + 1;

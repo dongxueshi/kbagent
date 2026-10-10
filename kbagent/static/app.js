@@ -123,9 +123,22 @@ function messageHTML(message) {
   return `<div class="message ${user ? 'user' : ''}"><span class="message-avatar">${user ? '本' : '✧'}</span><div class="message-body"><div class="message-label">${user ? '你' : message.mode === 'retrieval' ? 'KB Agent · 原文检索' : 'KB Agent · 智能体'}</div><div class="message-text">${esc(message.content)}</div>${!user && message.sources?.length ? `<div class="sources"><span class="source-label">参考来源 · 点击查看原文</span>${message.sources.map((s, i) => `<button class="source-chip" data-doc="${s.document_id}">[${i + 1}] ${esc(s.title)}</button>`).join('')}</div>` : ''}</div></div>`;
 }
 
+function formatMessage(message, target) {
+  if (message.role !== 'user' && target) {
+    target.classList.add('markdown');
+    KBLinks.renderMarkdown(message.content, target);
+  }
+}
+
+function formatMessages(messages, container) {
+  const targets = container.querySelectorAll('.message-text');
+  messages.forEach((message, index) => formatMessage(message, targets[index]));
+}
+
 function renderChat() {
   main.innerHTML = heading('与知识对话', `仅检索「${currentSpace().name}」中的资料，每一次引用都能追溯。`, '', 'ASK YOUR KNOWLEDGE') + `
     <section class="chat-layout"><aside class="history-panel"><button class="button" data-action="new-chat">＋ 新对话</button><div class="history-label">最近对话</div><div id="history-list">${state.conversations.map(c => `<button class="history-item ${state.conversation?.id === c.id ? 'active' : ''}" data-conversation="${c.id}">${esc(c.title)}</button>`).join('') || '<p class="muted" style="padding:10px;font-size:11px">还没有对话记录</p>'}</div></aside><div class="chat-panel"><div class="chat-messages" id="chat-messages">${state.conversation?.messages?.length ? state.conversation.messages.map(messageHTML).join('') : `<div class="chat-welcome"><div class="chat-logo">✧</div><h2>从一个好问题开始</h2><p>${state.settings.mode === 'agent' ? '智能体将规划、检索和阅读资料，结合文档为你解答。' : '当前为原文检索模式。输入关键词，找到知识库中的相关资料。'}</p><div class="suggestions"><button class="suggestion" data-question="支持哪些文档格式？">支持哪些文档格式？</button><button class="suggestion" data-question="如何配置模型？">如何配置模型？</button><button class="suggestion" data-question="知识库检索">了解知识库检索</button></div></div>`}</div><form class="chat-input-wrap" id="chat-form"><div class="chat-input"><textarea id="question" placeholder="输入你的问题，探索知识库…" aria-label="问答问题" maxlength="4000" required></textarea><button class="send-button" id="send" type="submit" aria-label="发送问题">↑</button></div><p>Enter 发送 · Shift + Enter 换行 · ${state.settings.mode === 'agent' ? 'AI 回答请结合来源核对' : '检索结果为原文片段，并非 AI 生成答案'}</p></form></div></section>`;
+  formatMessages(state.conversation?.messages || [], $('#chat-messages'));
   $('#question').addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -255,6 +268,7 @@ async function sendQuestion() {
         const assistant = {role:'assistant', content:event.content, sources:event.sources, mode:event.mode};
         state.conversation.messages.push({role:'user', content:question}, assistant);
         messagesEl.insertAdjacentHTML('beforeend', messageHTML(assistant));
+        formatMessage(assistant, messagesEl.lastElementChild.querySelector('.message-text'));
         progress.remove();
         scrollChat();
       }
@@ -280,6 +294,8 @@ async function sendQuestion() {
       messagesEl.querySelector('.message.user:last-of-type')?.remove();
       // Restore the exact persisted history rather than leave a failed question as saved.
       messagesEl.innerHTML = originalMessages.map(messageHTML).join('');
+      formatMessages(originalMessages, messagesEl);
+      scrollChat();
       input.value = question;
     }
   } finally {

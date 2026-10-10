@@ -9,6 +9,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from chat_browser_checks import check_chat
 from playwright.sync_api import expect, sync_playwright
 from test_storage import isolated_storage
 from wiki_browser_checks import check_wiki
@@ -137,6 +138,7 @@ def run():
                         "document.documentElement.scrollWidth <= window.innerWidth"
                     ), "Mobile layout overflows viewport"
                     page.screenshot(path=OUTPUT / "mobile.png", full_page=True)
+                    check_chat(page, url, OUTPUT)
                     check_wiki(page, url, OUTPUT)
                     assert not errors, errors
                     browser.close()
