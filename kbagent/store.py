@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import jieba
 
+from .relations import LinkStore
+
 jieba.setLogLevel(30)
 
 
@@ -36,7 +38,7 @@ def chunks(text: str, size: int = 900, overlap: int = 120) -> list[str]:
     ]
 
 
-class Store:
+class Store(LinkStore):
     def __init__(self, data_dir: Path):
         data_dir.mkdir(parents=True, exist_ok=True)
         self.path = data_dir / "kbagent.sqlite3"
@@ -90,6 +92,7 @@ class Store:
                 CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id);
                 CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id);
             """)
+            self._initialize_links(db)
 
     def spaces(self) -> list[dict]:
         with self.connection() as db:
@@ -120,8 +123,15 @@ class Store:
 
     def documents(self, space_id: str) -> list[dict]:
         with self.connection() as db:
+            aliases = {}
+            for row in db.execute(
+                """SELECT a.document_id,a.name FROM document_aliases a
+                JOIN documents d ON d.id=a.document_id WHERE d.space_id=? ORDER BY a.name""",
+                (space_id,),
+            ):
+                aliases.setdefault(row["document_id"], []).append(row["name"])
             return [
-                dict(r)
+                dict(r, aliases=aliases.get(r["id"], []))
                 for r in db.execute(
                     """
                 SELECT id, space_id, title, source, created_at, updated_at,
@@ -138,7 +148,18 @@ class Store:
             r = db.execute(
                 "SELECT * FROM documents WHERE space_id=? AND id=?", (space_id, document_id)
             ).fetchone()
-            return dict(r) if r else None
+            if not r:
+                return None
+            return dict(
+                r,
+                aliases=[
+                    row[0]
+                    for row in db.execute(
+                        "SELECT name FROM document_aliases WHERE document_id=? ORDER BY name",
+                        (document_id,),
+                    )
+                ],
+            )
 
     def save_document(
         self,
@@ -147,6 +168,7 @@ class Store:
         content: str,
         source: str = "手动创建",
         document_id: str | None = None,
+        aliases: list[str] | None = None,
     ) -> dict:
         stamp = now()
         item = dict(
@@ -159,6 +181,7 @@ class Store:
             updated_at=stamp,
         )
         with self.connection() as db:
+            old_title = None
             if document_id:
                 existing = db.execute(
                     "SELECT * FROM documents WHERE id=? AND space_id=?", (document_id, space_id)
@@ -167,6 +190,7 @@ class Store:
                     raise KeyError("文档不存在")
                 item["created_at"] = existing["created_at"]
                 item["source"] = existing["source"]
+                old_title = existing["title"]
                 db.execute(
                     """UPDATE documents SET title=:title, content=:content,
                            updated_at=:updated_at WHERE id=:id AND space_id=:space_id""",
@@ -179,6 +203,18 @@ class Store:
                            (:id,:space_id,:title,:content,:source,:created_at,:updated_at)""",
                     item,
                 )
+            if aliases is None:
+                aliases = [
+                    row[0]
+                    for row in db.execute(
+                        "SELECT name FROM document_aliases WHERE document_id=?", (item["id"],)
+                    )
+                ]
+            if old_title and old_title != title and old_title not in aliases:
+                aliases = [*aliases, old_title]
+            self._set_aliases(db, item["id"], aliases)
+            self._index_links(db, item)
+            self._resolve_pending(db, space_id)
             title_tokens = " ".join(tokenize(title))
             for pos, body in enumerate(chunks(content)):
                 cid = uuid4().hex
@@ -189,7 +225,7 @@ class Store:
                     "INSERT INTO chunk_fts VALUES (?,?,?,?)",
                     (cid, space_id, title_tokens, " ".join(tokenize(body))),
                 )
-        return item
+        return dict(item, aliases=aliases)
 
     @staticmethod
     def _remove_chunks(db, document_id):
@@ -207,6 +243,7 @@ class Store:
                 raise KeyError("文档不存在")
             self._remove_chunks(db, document_id)
             db.execute("DELETE FROM documents WHERE id=? AND space_id=?", (document_id, space_id))
+            self._resolve_pending(db, space_id)
 
     def search(self, space_id: str, query: str, limit: int = 6) -> list[dict]:
         terms = list(dict.fromkeys(tokenize(query)))[:32]
@@ -294,6 +331,10 @@ KB Agent 是一个基于 DeepAgents SDK 的本地知识库智能体系统。
 2. 新建 Markdown 文档，或导入 Markdown、TXT、PDF、DOCX 文件。
 3. 在「智能问答」中提问，查看可追溯的文档来源。
 
+## 关联阅读
+查看 [[文档导入指南]]，或阅读 [[本地模型配置]]。
+使用双向链接连接资料，右侧可查看反向引用和局部知识图谱。
+
 ## 检索与智能体
 未配置模型时，系统只返回知识库检索片段，不生成 AI 答案。
 配置支持工具调用的模型后，DeepAgents 可以规划任务、检索资料和阅读文档。
@@ -323,6 +364,7 @@ Markdown 与 TXT 使用 UTF-8 编码。
 修改配置后重启服务即可进入 DeepAgents 智能体模式。
 密钥只在服务端读取，不会返回给浏览器。
 本地数据默认保存到 data/kbagent.sqlite3，重启服务不会丢失文档和对话。
+返回 [[欢迎使用 KB Agent]] 查看完整开始流程。
 """,
             ),
         ]

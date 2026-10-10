@@ -93,3 +93,30 @@ def test_provider_failure_not_saved_or_downgraded(client, base, monkeypatch):
     assert "sensitive-provider" not in response.text
     assert client.get(base + f"/conversations/{cid}").json()["messages"] == []
     assert client.get("/api/settings").json()["mode"] == "agent"
+
+
+def test_agent_graph_tools_require_originals_for_evidence(client, space):
+    store = client.app.state.store
+    target = store.save_document(space["id"], "目标", "原文内容")
+    source = store.save_document(space["id"], "来源", "参考 [[目标]]")
+    other = store.create_space("其他库", "")
+    private = store.save_document(other["id"], "私密", "不能读取")
+    model = ScriptedModel(
+        responses=[
+            call("get_backlinks", {"document_id": target["id"]}, "backlinks"),
+            call("get_related_documents", {"document_id": target["id"]}, "neighbors"),
+            call("get_backlinks", {"document_id": private["id"]}, "denied"),
+            AIMessage(content="完成关联查询"),
+        ]
+    )
+    evidence = {}
+    graph = agent.build_agent(store, space["id"], Settings(_env_file=None), evidence, model)
+    result = graph.invoke({"messages": [{"role": "user", "content": "查看关联资料"}]})
+    outputs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert json.loads(outputs[0].content)["backlinks"][0]["source_id"] == source["id"]
+    assert {n["id"] for n in json.loads(outputs[1].content)["nodes"]} == {
+        source["id"],
+        target["id"],
+    }
+    assert "不属于" in outputs[2].content
+    assert evidence == {}  # A graph relation is not proof of a document's claims.

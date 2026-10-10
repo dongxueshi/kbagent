@@ -7,6 +7,8 @@ const main = $('#main');
 const dialog = $('#dialog');
 let toastTimer;
 let renderVersion = 0;
+let readerVersion = 0;
+let reader = null;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const date = value => new Date(value).toLocaleDateString('zh-CN', {month:'2-digit', day:'2-digit'});
 const currentSpace = () => state.spaces.find(s => s.id === state.spaceId);
@@ -135,6 +137,9 @@ function renderChat() {
 
 function scrollChat() { const el = $('#chat-messages'); if (el) el.scrollTop = el.scrollHeight; }
 function showDialog(html, wide = false) {
+  readerVersion++;
+  reader = null;
+  KBLinks.destroyGraph();
   dialog.className = wide ? 'wide' : '';
   $('#dialog-content').innerHTML = html;
   if (!dialog.open) dialog.showModal();
@@ -145,34 +150,57 @@ function newSpaceDialog() {
   showDialog(`<form id="space-form">${dialogHead('新建知识库')}<div class="dialog-body"><label class="field">知识库名称<input name="name" placeholder="例如：产品文档、团队手册" maxlength="100" required></label><label class="field">简介<textarea name="description" placeholder="简单描述这个知识库的主题" maxlength="500"></textarea></label></div><div class="dialog-footer"><button class="button" type="button" data-action="close-dialog">取消</button><button class="button primary" type="submit">创建知识库</button></div></form>`);
 }
 
-async function editor(documentId) {
-  const documentData = documentId ? await api(base() + '/documents/' + documentId) : {title:'', content:''};
-  showDialog(`<form id="document-form" data-id="${documentId || ''}">${dialogHead(documentId ? '编辑文档' : '新建文档')}<div class="dialog-body"><label class="field">文档标题<input name="title" value="${esc(documentData.title)}" placeholder="给文档一个清晰的标题" maxlength="200" required></label><div class="editor-tabs"><button type="button" class="active" data-action="editor-write">Markdown 编辑</button><button type="button" data-action="editor-preview">预览</button><small>保存后自动更新索引</small></div><textarea class="editor" id="editor-content" name="content" placeholder="# 文档标题&#10;&#10;在这里记录你的知识…" maxlength="200000" required>${esc(documentData.content)}</textarea><div class="markdown" id="editor-preview" hidden></div></div><div class="dialog-footer"><button class="button" type="button" data-action="close-dialog">取消</button><button class="button primary" type="submit">保存文档</button></div></form>`, true);
+async function editor(documentId, draft = {}, linkContext = null) {
+  const documentData = documentId ? await api(base() + '/documents/' + documentId) : {title:'', content:'', ...draft};
+  const bindingAttrs = linkContext ? ` data-link-source="${linkContext.sourceId}" data-link-id="${linkContext.linkId}"` : '';
+  showDialog(`<form id="document-form" data-id="${documentId || ''}"${bindingAttrs}>${dialogHead(documentId ? '编辑文档' : '新建文档')}<div class="dialog-body"><label class="field">文档标题<input name="title" value="${esc(documentData.title)}" placeholder="给文档一个清晰的标题" maxlength="200" required></label><label class="field">文档别名<input name="aliases" value="${esc((documentData.aliases || []).join('，'))}" placeholder="可选，多个别名用逗号分隔"></label><div class="editor-tabs"><button type="button" class="active" data-action="editor-write">Markdown 编辑</button><button type="button" data-action="editor-preview">预览</button><small>输入 [[ 插入双向链接</small></div><div class="editor-container"><textarea class="editor" id="editor-content" name="content" placeholder="# 文档标题&#10;&#10;在这里记录你的知识…使用 [[文档名]] 关联资料。" maxlength="200000" required>${esc(documentData.content)}</textarea><div id="wiki-completions" class="wiki-completions" hidden></div></div><div class="markdown" id="editor-preview" hidden></div></div><div class="dialog-footer"><button class="button" type="button" data-action="close-dialog">取消</button><button class="button primary" type="submit">保存文档</button></div></form>`, true);
+  KBLinks.attachAutocomplete($('#editor-content'), $('#wiki-completions'), state.documents);
 }
 
 function markdown(text, target) {
-  target.replaceChildren();
-  let code = null;
-  for (const line of text.split('\n')) {
-    if (line.startsWith('```')) {
-      if (code) { target.append(code); code = null; }
-      else code = document.createElement('pre');
-      continue;
-    }
-    if (code) { code.textContent += line + '\n'; continue; }
-    const heading = line.match(/^(#{1,3})\s+(.*)/);
-    const el = document.createElement(heading ? 'h' + heading[1].length : line.startsWith('> ') ? 'blockquote' : 'p');
-    el.textContent = heading ? heading[2] : line.startsWith('> ') ? line.slice(2) : line;
-    if (/^([-*]|\d+\.)\s/.test(line)) el.classList.add('list-line');
-    target.append(el);
-  }
-  if (code) target.append(code);
+  KBLinks.renderMarkdown(text, target);
 }
 
-async function viewDocument(id) {
-  const doc = await api(base() + '/documents/' + id);
-  showDialog(`${dialogHead(doc.title)}<div class="dialog-body"><div class="muted" style="font-size:11px;margin-bottom:20px">${esc(doc.source)} · ${date(doc.updated_at)} 更新</div><article class="markdown" id="document-preview"></article></div><div class="dialog-footer"><a class="button" href="/api${base()}/documents/${id}/export" download>↓ 导出 Markdown</a><button class="button primary" data-edit="${id}">编辑文档</button></div>`, true);
-  markdown(doc.content, $('#document-preview'));
+async function viewDocument(id, anchor = '') {
+  const version = ++readerVersion;
+  const sid = state.spaceId;
+  const [doc, relations] = await Promise.all([api(base() + '/documents/' + id), api(base() + '/documents/' + id + '/relations')]);
+  if (version !== readerVersion || sid !== state.spaceId) return;
+  const outgoing = relations.outgoing.map(link => `<button class="relation-item" data-wiki-link="${link.id}"><strong>${esc(link.label || link.target_name || link.anchor)}</strong><small>${link.status === 'resolved' ? '已关联' + (link.anchor ? ' · ' + esc(link.anchor) : '') : link.status === 'broken' ? '目标已删除 · 点击修复' : link.status === 'ambiguous' ? '同名文档 · 点击选择' : '尚未创建 · 点击创建'}</small></button>`).join('');
+  const backlinks = relations.backlinks.map(link => `<button class="relation-item" data-doc="${link.source_id}"><strong>${esc(link.source_title)}</strong><p>${esc(link.excerpt)}</p></button>`).join('');
+  showDialog(`${dialogHead(doc.title)}<div class="reader-tabs"><button class="active" data-action="reader-document">文档与引用</button><button data-action="reader-graph">◈ 局部知识图谱</button></div><div class="dialog-body reader-body"><div id="reader-document" class="reader-layout"><section><div class="muted reader-meta">${esc(doc.source)} · ${date(doc.updated_at)} 更新${doc.aliases.length ? ' · 别名：' + esc(doc.aliases.join('、')) : ''}</div><article class="markdown" id="document-preview"></article></section><aside class="knowledge-panel"><h3>文档链接 <span>${relations.outgoing.length}${relations.outgoing_truncated ? '+' : ''}</span></h3>${outgoing || '<p class="relation-empty">使用 [[文档名称]] 建立关联</p>'}<h3>反向引用 <span>${relations.backlinks.length}${relations.backlinks_truncated ? '+' : ''}</span></h3>${backlinks || '<p class="relation-empty">还没有文档引用此页</p>'}${relations.backlinks_truncated || relations.outgoing_truncated ? '<p class="relation-empty">每个方向最多显示 200 条引用</p>' : ''}</aside></div><section id="reader-graph" hidden><div class="graph-toolbar"><label>关联范围 <select id="graph-depth"><option value="1">一层邻居</option><option value="2">两层邻居</option></select></label><input id="graph-filter" aria-label="筛选图谱节点" placeholder="筛选节点名称"><button class="button" data-action="graph-fit">适应视图</button><button class="icon-button" data-action="graph-zoom-in" aria-label="放大图谱">＋</button><button class="icon-button" data-action="graph-zoom-out" aria-label="缩小图谱">−</button></div><div id="local-graph" class="local-graph" role="img" aria-label="当前文档的局部知识图谱"></div><div id="graph-selection" class="graph-selection"></div><div id="graph-summary" class="muted graph-summary"></div><details class="graph-accessible"><summary>关联文档列表（可用键盘访问）</summary><div id="graph-node-list"></div></details></section></div><div class="dialog-footer"><a class="button" href="/api${base()}/documents/${id}/export" download>↓ 导出 Markdown</a><button class="button primary" data-edit="${id}">编辑文档</button></div>`, true);
+  reader = {doc, relations, sid, graphVersion:0};
+  KBLinks.renderMarkdown(doc.content, $('#document-preview'), relations.outgoing);
+  $('#graph-depth').addEventListener('change', () => loadReaderGraph().catch(error => toast(error.message, true)));
+  $('#graph-filter').addEventListener('input', event => KBLinks.filter(event.target.value));
+  if (anchor && !KBLinks.scrollToAnchor($('#document-preview'), anchor)) toast('已打开文档，但没有找到标题：' + anchor);
+}
+
+async function loadReaderGraph() {
+  const context = reader;
+  if (!context) return;
+  const version = ++context.graphVersion;
+  const data = await api('/spaces/' + context.sid + '/documents/' + context.doc.id + '/graph?depth=' + $('#graph-depth').value);
+  if (reader !== context || version !== context.graphVersion || $('#reader-graph').hidden) return;
+  const open = id => viewDocument(id).catch(error => toast(error.message, true));
+  const selected = (id, title) => { $('#graph-selection').innerHTML = `<span>${esc(title)}</span><button class="text-button" data-doc="${id}">打开文档 →</button>`; };
+  KBLinks.mountGraph($('#local-graph'), data, open, selected);
+  selected(context.doc.id, context.doc.title);
+  KBLinks.filter($('#graph-filter').value);
+  $('#graph-summary').textContent = `${data.nodes.length} 个节点 · ${data.edges.length} 条关联 · 箭头表示引用方向 · 单击选择，双击打开${data.truncated ? ' · 已达到显示上限（80 节点 / 500 边）' : ''}`;
+  $('#graph-node-list').innerHTML = data.nodes.map(node => `<button class="source-chip" data-doc="${node.id}">${esc(node.title)}</button>`).join('');
+}
+
+async function openWikiLink(id) {
+  if (!reader) return;
+  const link = reader.relations.outgoing.find(item => item.id === id);
+  if (!link) return;
+  if (link.status === 'resolved') { await viewDocument(link.target_id, link.anchor); return; }
+  const sourceId = reader.doc.id;
+  const title = link.status === 'broken' ? '修复失效链接' : link.status === 'ambiguous' ? '选择链接目标' : '创建关联文档';
+  const canCreate = !!link.target_name && !link.target_name.startsWith('id:');
+  showDialog(`${dialogHead(title)}<div class="dialog-body"><p class="muted">${esc(link.raw)}${link.status === 'broken' ? ' 的原目标已删除。请选择文档，或创建后明确重新绑定。' : link.status === 'ambiguous' ? ' 对应多个文档，请明确选择。' : ' 尚未对应当前知识库中的文档。'}</p><div class="link-candidates">${link.candidates.map(doc => `<button class="relation-item" data-link-source="${sourceId}" data-link-id="${id}" data-bind-target="${doc.id}"><strong>${esc(doc.title)}</strong><small>文档 ${doc.id.slice(0, 8)} · 点击绑定</small></button>`).join('')}</div></div><div class="dialog-footer"><button class="button" data-doc="${sourceId}">返回原文</button>${canCreate ? `<button class="button primary" id="create-link-target">＋ 创建 ${esc(link.target_name)}</button>` : ''}</div>`);
+  if (canCreate) $('#create-link-target').addEventListener('click', () => editor(null, {title:link.target_name, content:'# ' + link.target_name + '\n\n'}, {sourceId, linkId:id}).catch(error => toast(error.message, true)));
 }
 
 async function searchDocuments() {
@@ -280,6 +308,12 @@ document.addEventListener('click', async event => {
       await render();
     }
     if (target.dataset.doc) await viewDocument(target.dataset.doc);
+    if (target.dataset.wikiLink) await openWikiLink(Number(target.dataset.wikiLink));
+    if (target.dataset.bindTarget) {
+      await api(base() + '/documents/' + target.dataset.linkSource + '/links/' + target.dataset.linkId, jsonOptions('PUT', {target_id:target.dataset.bindTarget}));
+      await viewDocument(target.dataset.linkSource);
+      toast('链接目标已确认');
+    }
     if (target.dataset.edit) await editor(target.dataset.edit);
     if (target.dataset.deleteDoc) {
       if (!confirm('确定删除这篇文档？相关检索片段也会删除。')) return;
@@ -303,9 +337,21 @@ document.addEventListener('click', async event => {
       const preview = action === 'editor-preview';
       $('#editor-content').hidden = preview;
       $('#editor-preview').hidden = !preview;
+      $('#wiki-completions').hidden = true;
       document.querySelectorAll('.editor-tabs button').forEach(b => b.classList.toggle('active', b === target));
       if (preview) markdown($('#editor-content').value, $('#editor-preview'));
     }
+    if (action === 'reader-document' || action === 'reader-graph') {
+      const graphView = action === 'reader-graph';
+      $('#reader-document').hidden = graphView;
+      $('#reader-graph').hidden = !graphView;
+      document.querySelectorAll('.reader-tabs button').forEach(button => button.classList.toggle('active', button === target));
+      if (graphView) await loadReaderGraph();
+      else KBLinks.destroyGraph();
+    }
+    if (action === 'graph-fit') KBLinks.fit();
+    if (action === 'graph-zoom-in') KBLinks.zoom(1.25);
+    if (action === 'graph-zoom-out') KBLinks.zoom(0.8);
     if (action === 'demo') {
       target.disabled = true;
       try {
@@ -340,8 +386,15 @@ document.addEventListener('submit', async event => {
     }
     if (form.id === 'document-form') {
       const id = form.dataset.id;
-      await api(base() + '/documents' + (id ? '/' + id : ''), jsonOptions(id ? 'PUT' : 'POST', Object.fromEntries(new FormData(form))));
-      dialog.close(); await changed(); toast('文档已保存，检索索引已更新');
+      const data = Object.fromEntries(new FormData(form));
+      data.aliases = [...new Set(data.aliases.split(/[,，]/).map(name => name.trim()).filter(Boolean))];
+      const saved = await api(base() + '/documents' + (id ? '/' + id : ''), jsonOptions(id ? 'PUT' : 'POST', data));
+      form.dataset.id = saved.id;
+      if (form.dataset.linkSource) {
+        await api(base() + '/documents/' + form.dataset.linkSource + '/links/' + form.dataset.linkId, jsonOptions('PUT', {target_id:saved.id}));
+      }
+      dialog.close(); await changed(); toast('文档已保存，检索和关联索引已更新');
+      if (form.dataset.linkSource) await viewDocument(form.dataset.linkSource);
     }
   } catch (error) { toast(error.message, true); }
   finally { if (submit) submit.disabled = false; }
@@ -364,6 +417,11 @@ $('#add-space').addEventListener('click', () => {
   newSpaceDialog();
 });
 dialog.addEventListener('click', event => { if (event.target === dialog) dialog.close(); });
+dialog.addEventListener('close', () => {
+  // A queued close event from a saved editor may arrive after another reader opens.
+  if (dialog.open) return;
+  readerVersion++; reader = null; KBLinks.destroyGraph();
+});
 
 (async () => {
   try {

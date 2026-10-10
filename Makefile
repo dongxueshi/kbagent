@@ -9,5 +9,6 @@ lint:
 	.venv/bin/ruff check kbagent tests scripts
 	.venv/bin/ruff format --check kbagent tests scripts
 	node --check kbagent/static/app.js
+	node --check kbagent/static/wiki.js
 browser:
 	.venv/bin/python scripts/browser_smoke.py

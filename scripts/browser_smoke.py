@@ -10,6 +10,7 @@ import urllib.request
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+from wiki_browser_checks import check_wiki
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "test-results"
@@ -126,6 +127,7 @@ def run():
                         "document.documentElement.scrollWidth <= window.innerWidth"
                     ), "Mobile layout overflows viewport"
                     page.screenshot(path=OUTPUT / "mobile.png", full_page=True)
+                    check_wiki(page, url, OUTPUT)
                     assert not errors, errors
                     browser.close()
                     print(

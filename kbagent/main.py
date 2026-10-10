@@ -33,6 +33,16 @@ class SpaceInput(BaseModel):
 class DocumentInput(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=200_000)
+    aliases: list[str] | None = Field(default=None, max_length=50)
+
+    @field_validator("aliases")
+    @classmethod
+    def valid_aliases(cls, values):
+        if values is None:
+            return None
+        if any(not value.strip() or len(value) > 200 for value in values):
+            raise ValueError("别名需为 1 至 200 字符")
+        return list(dict.fromkeys(value.strip() for value in values))
 
     @field_validator("title", "content")
     @classmethod
@@ -51,6 +61,10 @@ class QuestionInput(BaseModel):
         if not v.strip():
             raise ValueError("问题不能为空")
         return v.strip()
+
+
+class LinkBinding(BaseModel):
+    target_id: str = Field(min_length=1, max_length=64)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -125,7 +139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/spaces/{space_id}/documents", status_code=201)
     def new_document(space_id: str, body: DocumentInput):
         require_space(space_id)
-        return store.save_document(space_id, body.title, body.content)
+        return store.save_document(space_id, body.title, body.content, aliases=body.aliases)
 
     @app.get("/api/spaces/{space_id}/documents/{document_id}")
     def get_document(space_id: str, document_id: str):
@@ -134,7 +148,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.put("/api/spaces/{space_id}/documents/{document_id}")
     def update_document(space_id: str, document_id: str, body: DocumentInput):
         require_document(space_id, document_id)
-        return store.save_document(space_id, body.title, body.content, document_id=document_id)
+        return store.save_document(
+            space_id, body.title, body.content, document_id=document_id, aliases=body.aliases
+        )
+
+    @app.get("/api/spaces/{space_id}/documents/{document_id}/relations")
+    def relations(space_id: str, document_id: str):
+        result = store.relations(space_id, document_id)
+        if result is None:
+            raise HTTPException(404, "文档不存在")
+        return result
+
+    @app.get("/api/spaces/{space_id}/documents/{document_id}/graph")
+    def graph(space_id: str, document_id: str, depth: int = Query(default=1, ge=1, le=2)):
+        result = store.graph(space_id, document_id, depth)
+        if result is None:
+            raise HTTPException(404, "文档不存在")
+        return result
+
+    @app.put("/api/spaces/{space_id}/documents/{document_id}/links/{link_id}")
+    def bind_link(space_id: str, document_id: str, link_id: int, body: LinkBinding):
+        try:
+            store.bind_link(space_id, document_id, link_id, body.target_id)
+        except KeyError as exc:
+            raise HTTPException(404, exc.args[0]) from exc
+        return {"status": "resolved", "target_id": body.target_id}
 
     @app.delete("/api/spaces/{space_id}/documents/{document_id}", status_code=204)
     def delete_document(space_id: str, document_id: str):
