@@ -11,33 +11,63 @@
 - Markdown 新建、编辑、基础安全预览和导出。
 - Obsidian 风格双向链接、编辑自动补全、反向引用侧栏和交互式局部图谱。
 - Markdown / TXT / PDF / DOCX 导入，单文件默认最大 10 MB，单文档最大 200,000 字符。
-- 中文分词 + SQLite FTS5 / BM25，无需嵌入模型，文档更新和删除时事务性维护索引。
+- 中文分词 + MySQL 词项索引 / BM25，无需嵌入模型，文档更新和删除时事务性维护索引。
 - DeepAgents 主智能体、知识检索子智能体、规划、检索/阅读/反向引用/关联查询工具，以及虚拟文件工作区。
 - 问答过程通过 SSE 显示工具执行进度，完成后返回答案和可点击的文档引用。
-- SQLite 持久化文档、会话和已完成的问答；失败请求不会保存半个对话轮次。
+- MySQL 持久化文档、关联、检索索引、会话和已完成的问答；MinIO 保存上传原件，支持下载；失败请求不会保存半个对话轮次。
 - 不配置模型时，返回明确标注的原文片段，不假冒 AI 答案。
 
 ## 本地启动
 
-要求 Python **3.12 或 3.13**、[uv](https://docs.astral.sh/uv/getting-started/installation/)。Node 仅用于可选 JavaScript 语法检查，不是运行依赖。
+要求 Python **3.12 或 3.13**、[uv](https://docs.astral.sh/uv/getting-started/installation/)，以及 Docker / Docker Compose（或已有的 MySQL 8 和 MinIO 服务）。Node 仅用于 JavaScript 语法检查。
 
 ```bash
-cd /workspace/kbagent
 bash scripts/setup.sh
+make services
 bash scripts/start.sh
 ```
 
-在本机浏览器访问端口 `8000`。服务默认只监听 `127.0.0.1`，健康检查为 `GET /api/health`，交互式 API 文档位于 `/docs`。云环境 onboarding 不提供 localhost 网页预览；在云机器中可使用本地 HTTP 请求验证。
+`make services` 首次创建忽略提交的 `.env`，生成随机本地密码，启动 MySQL 8.4 与 MinIO；已有 `.env` 会保留。MinIO 社区公开镜像不可用，因此本地 Compose 使用固定版本的 Bitnami 归档镜像，并锁定 SHA-256 digest。镜像支持 amd64 和 arm64。已有外部服务时跳过 `make services`，复制 `.env.example` 并填写连接信息。
 
-首次启动没有虚构的知识库数据。点击「加载示例知识库」会创建三篇可编辑、可删除的示例文档；也可以直接创建空白知识库。
+浏览器访问 **http://localhost:8000**，默认仅监听 `127.0.0.1`。健康检查 `GET /api/health` 验证 MySQL 与 MinIO；API 文档在 `/docs`。首次启动为空，可点击「加载示例知识库」创建示例。更换端口可在 `.env` 设置 `KBAGENT_PORT=8010`，或通过环境变量覆盖；避免浏览器禁止的 `6000` 端口。
 
-更换端口：`KBAGENT_PORT=8010 bash scripts/start.sh`。数据默认保存在项目的 `data/kbagent.sqlite3`，可通过 `KBAGENT_DATA_DIR` 更改。将 SQLite 的数据库、WAL 和 SHM 作为一个整体处理；备份推荐停止服务后复制整个数据目录。
+### 存储配置
+
+在项目根目录 `.env` 配置，修改后重启应用。完整模板见 [.env.example](.env.example)。
+
+```dotenv
+KBAGENT_MYSQL_HOST=127.0.0.1
+KBAGENT_MYSQL_PORT=3306
+KBAGENT_MYSQL_DATABASE=kbagent
+KBAGENT_MYSQL_USER=kbagent
+KBAGENT_MYSQL_PASSWORD=填写数据库密码
+
+KBAGENT_MINIO_ENDPOINT=127.0.0.1:9000
+KBAGENT_MINIO_ACCESS_KEY=填写访问密钥
+KBAGENT_MINIO_SECRET_KEY=填写私有密钥
+KBAGENT_MINIO_BUCKET=kbagent
+KBAGENT_MINIO_SECURE=false
+```
+
+MinIO endpoint 使用 `主机:端口`，不包含 `http://` 或路径。HTTPS 服务设置 `KBAGENT_MINIO_SECURE=true`；证书会正常验证。MySQL TLS 可通过 `KBAGENT_MYSQL_SSL_CA` 指定 CA 文件，并验证主机名。`KBAGENT_MINIO_REGION` 默认 `us-east-1`；默认自动创建 bucket，可用 `KBAGENT_MINIO_CREATE_BUCKET=false` 改为只使用已有 bucket。MySQL 数据库必须预先存在，账号需有建表与数据读写权限；本地 Compose 自动初始化。
+
+本地 MinIO 控制台为 `http://localhost:9001`，使用 `.env` 中的访问密钥登录。`MYSQL_ROOT_PASSWORD` 仅用于 Compose 初始化和独立测试库，不用于应用连接。首次初始化后修改 `.env` 中的数据库密码不会自动修改已有 MySQL 用户，请先在服务中更新对应账号。MySQL 和 MinIO 使用 Docker 命名卷，停止容器保留数据；备份需同时保留数据库和 bucket，并使两份备份保持一致。
+
+### 迁移旧 SQLite 数据
+
+停止旧版本服务，配置 MySQL 后执行：
+
+```bash
+.venv/bin/python scripts/migrate_sqlite.py --source data/kbagent.sqlite3
+```
+
+迁移要求目标数据库为空，保留文档 ID、别名、已绑定链接和会话，重新建立检索索引；失败会回滚数据写入，旧 SQLite 文件保持不变。旧版本只保存提取后的正文，没有上传原件字节，因此历史原件无法恢复。运行后再启动新服务。
 
 `uv.lock` 固定依赖，`scripts/setup.sh` 使用冻结锁文件安装。云环境默认缓存目录为 `/workspace/.cache/uv`；其他机器可以覆盖：`UV_CACHE_DIR="$HOME/.cache/uv" bash scripts/setup.sh`。
 
 ## 稍后接入模型
 
-复制 `.env.example` 为 `.env`，在本机填写自己的值；不要提交 `.env`。
+在已有 `.env` 中填写模型配置；不要覆盖存储连接信息或提交 `.env`。
 
 ```dotenv
 KBAGENT_API_KEY=你的密钥
@@ -66,22 +96,26 @@ KBAGENT_BASE_URL=https://api.openai.com/v1
 
 链接仅在当前知识库内解析。代码块、行内代码、HTML 注释、缩进代码、转义的链接以及 `![[嵌入]]` 不建立关联。名称、锚点或显示文字超过 200 字符的标记作为普通文本保留。标题锚点目前支持标题文本，不支持 Obsidian 块引用、附件嵌入或完整 Vault 同步。
 
-第一次升级启动会自动为既有文档补建关联索引，不修改原文。文档保存同时更新全文检索与链接索引；关联数据保存在同一 SQLite 数据库中。图谱通过本地打包的 Cytoscape.js 渲染，无需 CDN 或模型服务。
+第一次升级启动会自动为既有文档补建关联索引，不修改原文。文档保存同时更新全文检索与链接索引；关联数据保存在同一 MySQL 数据库中。图谱通过本地打包的 Cytoscape.js 渲染，无需 CDN 或模型服务。
 
 智能体可以调用 `get_backlinks` / `get_related_documents` 沿链接寻找上下文。关联列表不是内容证据，智能体仍需阅读原文才能给出相关文档引用。
 
 ## 验证
 
 ```bash
+# 为本地测试准备独立 MySQL 数据库（需 Docker）
+make test-services
 make test
 make lint
 # 可选：已安装 Chromium 时，执行真实浏览器端到端检查
 make browser
 ```
 
-测试覆盖 CRUD、中文检索、索引更新/清理、知识库隔离、四种文件格式、大小/格式错误、SSE、会话持久化、重启、链接解析/迁移/重命名/删除修复/同名选择、图谱遍历、真实 DeepAgents 图的工具调用、引用校验和服务端文件隔离。浏览器检查还覆盖自动补全、标题跳转、引用侧栏、实际图谱节点点击、关联创建、两层图谱和手机布局。
+`KBAGENT_TEST_MYSQL_DATABASE` 默认 `kbagent_test`，必须与应用数据库不同且以 `_test` 结尾。测试会清空该测试数据库，并创建、删除独立的临时 bucket；外部服务用户需自行创建测试库并授权。
 
-SDK 测试使用确定性模型测试替身驱动**真实 DeepAgents 图**，无需外部密钥；这不代表真实模型服务已连通。浏览器脚本启动隔离数据目录，结束后停止测试服务，不修改个人知识库。
+测试使用真实 MySQL 和 MinIO，覆盖原件上传/下载/删除、清理重试、写入失败回滚、SQLite 迁移，以及 CRUD、中文检索、索引更新/清理、知识库隔离、四种文件格式、大小/格式错误、SSE、会话持久化、重启、链接解析/迁移/重命名/删除修复/同名选择、图谱遍历、真实 DeepAgents 图的工具调用、引用校验和服务端文件隔离。浏览器检查还覆盖自动补全、标题跳转、引用侧栏、实际图谱节点点击、关联创建、两层图谱和手机布局。
+
+SDK 测试使用确定性模型测试替身驱动**真实 DeepAgents 图**，无需外部密钥；这不代表真实模型服务已连通。测试与浏览器脚本使用独立的 `_test` 数据库和临时 MinIO bucket，结束后清理测试数据；请勿并行运行这两项。
 
 ## 架构与边界
 

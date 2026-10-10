@@ -9,7 +9,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
+from test_storage import isolated_storage
 from wiki_browser_checks import check_wiki
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +23,9 @@ def run():
         port = sock.getsockname()[1]
     env = dict(os.environ, KBAGENT_API_KEY="", KBAGENT_MODEL="", KBAGENT_PORT=str(port))
     OUTPUT.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="kbagent-browser-") as data:
-        env["KBAGENT_DATA_DIR"] = data
+    with isolated_storage() as settings:
+        env["KBAGENT_MYSQL_DATABASE"] = settings.mysql_database
+        env["KBAGENT_MINIO_BUCKET"] = settings.minio_bucket
         with tempfile.TemporaryFile(mode="w+") as logs:
             server = subprocess.Popen(
                 ["bash", "scripts/start.sh"],
@@ -100,6 +102,14 @@ def run():
                         }
                     )
                     page.locator("table button[data-doc]").filter(has_text="浏览器导入").wait_for()
+                    page.locator("table button[data-doc]").filter(has_text="浏览器导入").click()
+                    with page.expect_download() as original:
+                        page.get_by_role("link", name="↓ 下载原件").click()
+                    assert (
+                        Path(original.value.path()).read_bytes()
+                        == "导入文档包含持久化数据库说明。".encode()
+                    )
+                    page.get_by_role("button", name="关闭", exact=True).click()
                     page.locator('nav [data-view="chat"]').click()
                     page.locator("#question").fill("离线环境")
                     page.locator("#question").press("Enter")
@@ -115,7 +125,7 @@ def run():
                     page.locator(".history-item").first.click()
                     page.locator(".source-chip").first.wait_for()
                     page.locator(".source-chip").first.click()
-                    assert "新部署指南" in page.locator("#document-preview").inner_text()
+                    expect(page.locator("#document-preview")).to_contain_text("新部署指南")
                     page.get_by_role("button", name="关闭", exact=True).click()
                     page.locator('nav [data-view="settings"]').click()
                     page.get_by_role("heading", name="连接模型服务").wait_for()

@@ -181,13 +181,13 @@ def test_graph_two_hops_duplicates_cycles_and_isolation(client, base):
     )
 
 
-def test_migration_backfills_existing_docs_once(client, base, tmp_path):
+def test_migration_backfills_existing_docs_once(client, base):
     a = create(client, base, "A", "旧资料 [[B]]")
     b = create(client, base, "B", "旧资料")
     with client.app.state.store.connection() as db:
-        db.executescript("""DROP TABLE document_links; DROP TABLE document_aliases;
-                           DROP TABLE schema_meta;""")
-    restored = Store(tmp_path)
+        for table in ["document_links", "document_aliases", "schema_meta"]:
+            db.execute(f"DROP TABLE {table}")
+    restored = Store(client.app.state.settings)
     restored.initialize()
     first = restored.relations(a["space_id"], a["id"])["outgoing"]
     assert len(first) == 1 and first[0]["target_id"] == b["id"]

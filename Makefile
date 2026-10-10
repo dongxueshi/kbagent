@@ -1,6 +1,10 @@
-.PHONY: setup run test lint browser
+.PHONY: setup services test-services run test lint browser
 setup:
 	bash scripts/setup.sh
+services:
+	.venv/bin/python scripts/dev_services.py
+test-services:
+	.venv/bin/python scripts/dev_services.py --test-db
 run:
 	bash scripts/start.sh
 test:

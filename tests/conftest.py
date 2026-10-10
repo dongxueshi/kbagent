@@ -1,15 +1,16 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from kbagent.config import Settings
 from kbagent.main import create_app
+from scripts.test_storage import isolated_storage
 
 
 @pytest.fixture
-def client(tmp_path):
-    app = create_app(Settings(data_dir=tmp_path, api_key="", model="", _env_file=None))
-    with TestClient(app) as client:
-        yield client
+def client():
+    with isolated_storage() as settings:
+        app = create_app(settings)
+        with TestClient(app) as client:
+            yield client
 
 
 @pytest.fixture

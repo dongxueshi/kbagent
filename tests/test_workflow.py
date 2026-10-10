@@ -4,7 +4,6 @@ import json
 import pytest
 from docx import Document
 
-from kbagent.config import Settings
 from kbagent.main import create_app
 
 
@@ -15,13 +14,18 @@ def events(response):
 
 
 def test_health_empty_state_and_secrets(client):
-    assert client.get("/api/health").json() == {"status": "ok", "database": "ok"}
+    assert client.get("/api/health").json() == {
+        "status": "ok",
+        "database": "ok",
+        "object_storage": "ok",
+    }
     assert client.get("/api/spaces").json() == []
     assert client.get("/").status_code == 200
     assert client.get("/static/app.js").status_code == 200
     data = client.get("/api/settings").json()
     assert data["mode"] == "retrieval"
-    assert "api_key" not in data
+    assert set(data) == {"mode", "model", "sdk", "database", "object_storage", "max_upload_bytes"}
+    assert data["database"] == "mysql" and data["object_storage"] == "minio"
 
 
 def test_chinese_search_update_delete_and_isolation(client, base):
@@ -67,6 +71,9 @@ def test_upload_text_docx_and_rejections(client, base):
     response = client.post(base + "/import", files={"file": ("预算.docx", buf.getvalue())})
     assert response.status_code == 201
     assert "预算 | 5000元" in response.json()["content"]
+    assert (
+        client.get(base + f"/documents/{response.json()['id']}/original").content == buf.getvalue()
+    )
     for name, content in [
         ("invalid.pdf", b"broken"),
         ("empty.txt", b""),
@@ -107,6 +114,7 @@ def test_pdf_text_extraction(client, base):
     response = client.post(base + "/import", files={"file": ("guide.pdf", pdf)})
     assert response.status_code == 201
     assert "Knowledge import guide" in response.json()["content"]
+    assert client.get(base + f"/documents/{response.json()['id']}/original").content == pdf
 
 
 def test_retrieval_chat_persistence_and_cascade(client, base, space):
@@ -134,16 +142,23 @@ def test_retrieval_chat_persistence_and_cascade(client, base, space):
     assert client.delete(base).status_code == 204
     assert client.get(path).status_code == 404
     with client.app.state.store.connection() as db:
-        for table in ["documents", "chunks", "chunk_fts", "conversations", "messages"]:
+        for table in ["documents", "chunks", "chunk_terms", "conversations", "messages"]:
             assert db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
 
 
-def test_restart_retains_data(client, base, tmp_path):
+def test_restart_retains_data(client, base):
     from fastapi.testclient import TestClient
 
     client.post(base + "/documents", json={"title": "持久化", "content": "重启不会丢失资料"})
-    with TestClient(create_app(Settings(data_dir=tmp_path, _env_file=None))) as second:
-        assert len(second.get(base + "/documents").json()) == 1
+    uploaded = client.post(
+        base + "/import", files={"file": ("restart.txt", b"persistent original")}
+    ).json()
+    with TestClient(create_app(client.app.state.settings)) as second:
+        assert len(second.get(base + "/documents").json()) == 2
+        assert (
+            second.get(base + f"/documents/{uploaded['id']}/original").content
+            == b"persistent original"
+        )
         assert second.get(base + "/search", params={"q": "重启"}).json()
 
 

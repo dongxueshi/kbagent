@@ -1,16 +1,17 @@
-"""Transactional SQLite storage and Chinese-friendly FTS5 retrieval."""
+"""Transactional MySQL storage and Chinese-friendly BM25 retrieval."""
 
 import json
 import re
-import sqlite3
-from contextlib import contextmanager
-from datetime import UTC, datetime
-from pathlib import Path
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import jieba
 
+from .config import Settings
+from .database import transaction
 from .relations import LinkStore
+from .schema import initialize_schema
 
 jieba.setLogLevel(30)
 
@@ -39,59 +40,15 @@ def chunks(text: str, size: int = 900, overlap: int = 120) -> list[str]:
 
 
 class Store(LinkStore):
-    def __init__(self, data_dir: Path):
-        data_dir.mkdir(parents=True, exist_ok=True)
-        self.path = data_dir / "kbagent.sqlite3"
+    def __init__(self, settings: Settings):
+        self.settings = settings
 
-    @contextmanager
     def connection(self):
-        db = sqlite3.connect(self.path, timeout=30)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
-        try:
-            yield db
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        return transaction(self.settings)
 
     def initialize(self):
         with self.connection() as db:
-            db.execute("PRAGMA journal_mode=WAL")
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS spaces (
-                    id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS documents (
-                    id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id)
-                    ON DELETE CASCADE, title TEXT NOT NULL, content TEXT NOT NULL,
-                    source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS chunks (
-                    id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id)
-                    ON DELETE CASCADE, space_id TEXT NOT NULL, position INTEGER NOT NULL,
-                    content TEXT NOT NULL
-                );
-                CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
-                    chunk_id UNINDEXED, space_id UNINDEXED, title, body
-                );
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id)
-                    ON DELETE CASCADE, title TEXT NOT NULL, created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                    role TEXT NOT NULL, content TEXT NOT NULL, sources TEXT NOT NULL,
-                    mode TEXT NOT NULL, created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS documents_space ON documents(space_id);
-                CREATE INDEX IF NOT EXISTS chunks_document ON chunks(document_id);
-                CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id);
-            """)
+            initialize_schema(db)
             self._initialize_links(db)
 
     def spaces(self) -> list[dict]:
@@ -118,7 +75,7 @@ class Store(LinkStore):
 
     def delete_space(self, space_id: str):
         with self.connection() as db:
-            db.execute("DELETE FROM chunk_fts WHERE space_id=?", (space_id,))
+            self._queue_space_files(db, space_id)
             db.execute("DELETE FROM spaces WHERE id=?", (space_id,))
 
     def documents(self, space_id: str) -> list[dict]:
@@ -135,7 +92,7 @@ class Store(LinkStore):
                 for r in db.execute(
                     """
                 SELECT id, space_id, title, source, created_at, updated_at,
-                    length(content) character_count,
+                    CHAR_LENGTH(content) character_count,
                     (SELECT count(*) FROM chunks c WHERE c.document_id=d.id) chunk_count
                 FROM documents d WHERE space_id=? ORDER BY updated_at DESC, id
             """,
@@ -150,8 +107,13 @@ class Store(LinkStore):
             ).fetchone()
             if not r:
                 return None
+            original = db.execute(
+                "SELECT filename,content_type,size,sha256 FROM original_files WHERE document_id=?",
+                (document_id,),
+            ).fetchone()
             return dict(
                 r,
+                original_file=dict(original) if original else None,
                 aliases=[
                     row[0]
                     for row in db.execute(
@@ -169,6 +131,7 @@ class Store(LinkStore):
         source: str = "手动创建",
         document_id: str | None = None,
         aliases: list[str] | None = None,
+        original_file: dict | None = None,
     ) -> dict:
         stamp = now()
         item = dict(
@@ -215,25 +178,53 @@ class Store(LinkStore):
             self._set_aliases(db, item["id"], aliases)
             self._index_links(db, item)
             self._resolve_pending(db, space_id)
-            title_tokens = " ".join(tokenize(title))
-            for pos, body in enumerate(chunks(content)):
-                cid = uuid4().hex
+            self._index_chunks(db, item)
+            if original_file:
                 db.execute(
-                    "INSERT INTO chunks VALUES (?,?,?,?,?)", (cid, item["id"], space_id, pos, body)
+                    """INSERT INTO original_files
+                    (document_id,object_key,filename,content_type,size,sha256)
+                    VALUES (:document_id,:object_key,:filename,:content_type,:size,:sha256)""",
+                    dict(original_file, document_id=item["id"]),
                 )
                 db.execute(
-                    "INSERT INTO chunk_fts VALUES (?,?,?,?)",
-                    (cid, space_id, title_tokens, " ".join(tokenize(body))),
+                    "DELETE FROM object_deletions WHERE object_key=?",
+                    (original_file["object_key"],),
                 )
-        return dict(item, aliases=aliases)
+        return self.document(space_id, item["id"])
+
+    @staticmethod
+    def _index_chunks(db, document):
+        title_terms = Counter(term for term in tokenize(document["title"]) if len(term) <= 200)
+        for pos, body in enumerate(chunks(document["content"])):
+            cid = uuid4().hex
+            body_terms = Counter(term for term in tokenize(body) if len(term) <= 200)
+            size = 3 * sum(title_terms.values()) + sum(body_terms.values())
+            db.execute(
+                """INSERT INTO chunks
+                (id,document_id,space_id,position,content,token_count) VALUES (?,?,?,?,?,?)""",
+                (cid, document["id"], document["space_id"], pos, body, max(size, 1)),
+            )
+            db.executemany(
+                "INSERT INTO chunk_terms VALUES (?,?,?,?,?)",
+                [
+                    (cid, document["space_id"], term, title_terms[term], body_terms[term])
+                    for term in title_terms.keys() | body_terms.keys()
+                ],
+            )
 
     @staticmethod
     def _remove_chunks(db, document_id):
-        db.execute(
-            "DELETE FROM chunk_fts WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id=?)",
-            (document_id,),
-        )
         db.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
+
+    @staticmethod
+    def _queue_space_files(db, space_id):
+        db.execute(
+            """INSERT INTO object_deletions (object_key,not_before)
+            SELECT f.object_key,UTC_TIMESTAMP(6) FROM original_files f
+            JOIN documents d ON d.id=f.document_id WHERE d.space_id=?
+            ON DUPLICATE KEY UPDATE not_before=UTC_TIMESTAMP(6)""",
+            (space_id,),
+        )
 
     def delete_document(self, space_id: str, document_id: str):
         with self.connection() as db:
@@ -241,28 +232,97 @@ class Store(LinkStore):
                 "SELECT 1 FROM documents WHERE id=? AND space_id=?", (document_id, space_id)
             ).fetchone():
                 raise KeyError("文档不存在")
-            self._remove_chunks(db, document_id)
+            db.execute(
+                """INSERT INTO object_deletions (object_key,not_before)
+                SELECT object_key,UTC_TIMESTAMP(6) FROM original_files WHERE document_id=?
+                ON DUPLICATE KEY UPDATE not_before=UTC_TIMESTAMP(6)""",
+                (document_id,),
+            )
             db.execute("DELETE FROM documents WHERE id=? AND space_id=?", (document_id, space_id))
             self._resolve_pending(db, space_id)
 
     def search(self, space_id: str, query: str, limit: int = 6) -> list[dict]:
-        terms = list(dict.fromkeys(tokenize(query)))[:32]
+        terms = [term for term in dict.fromkeys(tokenize(query)) if len(term) <= 200][:32]
         if not terms:
             return []
-        expression = " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
+        slots = ",".join("?" for _ in terms)
         with self.connection() as db:
+            stats = db.execute(
+                """SELECT count(*) n, COALESCE(AVG(token_count),1) average
+                FROM chunks WHERE space_id=?""",
+                (space_id,),
+            ).fetchone()
+            if not stats["n"]:
+                return []
+            # BM25 (k1=1.2, b=0.75), title frequency weighted by 3.
+            # Exact token postings avoid MySQL FULLTEXT minimum-word-length/stopword pitfalls.
             rows = db.execute(
-                """
-                SELECT c.id chunk_id, c.document_id, c.position, c.content,
-                    d.title, d.source, bm25(chunk_fts, 0, 0, 3, 1) rank
-                FROM chunk_fts JOIN chunks c ON c.id=chunk_fts.chunk_id
+                f"""SELECT c.id chunk_id,c.document_id,c.position,c.content,
+                d.title,d.source,
+                -SUM(LOG(1+(?-freq.df+0.5)/(freq.df+0.5)) *
+                    ((3*t.title_freq+t.body_freq)*2.2) /
+                    ((3*t.title_freq+t.body_freq)+1.2*(0.25+0.75*c.token_count/?))) `rank`
+                FROM chunk_terms t JOIN chunks c ON c.id=t.chunk_id
                 JOIN documents d ON d.id=c.document_id
-                WHERE chunk_fts MATCH ? AND chunk_fts.space_id=? AND d.space_id=?
-                ORDER BY rank LIMIT ?
-            """,
-                (expression, space_id, space_id, limit),
+                JOIN (SELECT term,count(*) df FROM chunk_terms
+                    WHERE space_id=? AND term IN ({slots}) GROUP BY term) freq ON freq.term=t.term
+                WHERE t.space_id=? AND d.space_id=? AND t.term IN ({slots})
+                GROUP BY c.id,d.id ORDER BY `rank`,c.id LIMIT ?""",
+                (
+                    stats["n"],
+                    float(stats["average"]),
+                    space_id,
+                    *terms,
+                    space_id,
+                    space_id,
+                    *terms,
+                    limit,
+                ),
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [dict(row) for row in rows]
+
+    def original_file(self, space_id, document_id):
+        with self.connection() as db:
+            row = db.execute(
+                """SELECT f.* FROM original_files f JOIN documents d
+                ON d.id=f.document_id WHERE d.space_id=? AND d.id=?""",
+                (space_id, document_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def reserve_object(self, key):
+        # Reserve cleanup before uploading. A failed/ambiguous SQL commit cannot delete a live blob.
+        with self.connection() as db:
+            db.execute(
+                "INSERT INTO object_deletions VALUES (?,?)",
+                (key, datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)),
+            )
+
+    def abandon_object(self, key):
+        with self.connection() as db:
+            db.execute(
+                """UPDATE object_deletions SET not_before=UTC_TIMESTAMP(6)
+                WHERE object_key=? AND NOT EXISTS
+                (SELECT 1 FROM original_files WHERE object_key=?)""",
+                (key, key),
+            )
+
+    def pending_deletions(self, limit=100):
+        with self.connection() as db:
+            return [
+                row["object_key"]
+                for row in db.execute(
+                    """SELECT q.object_key
+                FROM object_deletions q WHERE q.not_before<=UTC_TIMESTAMP(6)
+                AND NOT EXISTS (SELECT 1 FROM original_files f WHERE f.object_key=q.object_key)
+                ORDER BY q.not_before LIMIT ?""",
+                    (limit,),
+                )
+            ]
+
+    def finish_deletion(self, key):
+        with self.connection() as db:
+            db.execute("DELETE FROM object_deletions WHERE object_key=?", (key,))
 
     def create_conversation(self, space_id: str, title: str = "新对话") -> dict:
         item = dict(id=uuid4().hex, space_id=space_id, title=title, created_at=now())
@@ -351,7 +411,7 @@ Markdown 与 TXT 使用 UTF-8 编码。
 扫描版 PDF 暂不支持 OCR，请先转为含文本的 PDF。
 
 文档会自动按 900 字符分片，相邻片段重叠 120 字符。
-系统使用中文分词和 SQLite FTS5 BM25 检索，不需要嵌入模型。
+系统使用中文分词和 MySQL 词项索引进行 BM25 检索，不需要嵌入模型。
 编辑或删除文档后，检索索引在同一事务中更新。
 """,
             ),
@@ -363,7 +423,7 @@ Markdown 与 TXT 使用 UTF-8 编码。
 模型需支持 OpenAI 兼容的 Chat Completions API 和工具调用。
 修改配置后重启服务即可进入 DeepAgents 智能体模式。
 密钥只在服务端读取，不会返回给浏览器。
-本地数据默认保存到 data/kbagent.sqlite3，重启服务不会丢失文档和对话。
+文档、会话和关联保存到 MySQL，上传原件保存到 MinIO。重启服务不会丢失已保存资料。
 返回 [[欢迎使用 KB Agent]] 查看完整开始流程。
 """,
             ),

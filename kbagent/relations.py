@@ -1,4 +1,4 @@
-"""Wiki-link indexing and scoped graph queries, mixed into the SQLite Store."""
+"""Wiki-link indexing and scoped graph queries, mixed into the MySQL Store."""
 
 from collections import defaultdict, deque
 
@@ -7,28 +7,7 @@ from .wikilinks import parse_links
 
 class LinkStore:
     def _initialize_links(self, db):
-        db.executescript("""
-            CREATE TABLE IF NOT EXISTS document_aliases (
-                document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-                name TEXT NOT NULL, PRIMARY KEY (document_id, name)
-            );
-            CREATE TABLE IF NOT EXISTS document_links (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-                source_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-                target_id TEXT REFERENCES documents(id) ON DELETE SET NULL,
-                bound_id TEXT,
-                target_name TEXT NOT NULL, anchor TEXT NOT NULL, label TEXT NOT NULL,
-                raw TEXT NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL,
-                excerpt TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS links_source ON document_links(source_id);
-            CREATE INDEX IF NOT EXISTS links_target ON document_links(target_id);
-            CREATE INDEX IF NOT EXISTS links_space ON document_links(space_id);
-            CREATE INDEX IF NOT EXISTS aliases_name ON document_aliases(name);
-            CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        """)
-        if not db.execute("SELECT 1 FROM schema_meta WHERE key='wiki_links_v1'").fetchone():
+        if not db.execute("SELECT 1 FROM schema_meta WHERE `key`='wiki_links_v1'").fetchone():
             for document in db.execute("SELECT * FROM documents").fetchall():
                 self._index_links(db, dict(document))
             for row in db.execute("SELECT id FROM spaces").fetchall():
@@ -78,7 +57,7 @@ class LinkStore:
     def _index_links(db, document):
         previous = defaultdict(deque)
         for row in db.execute(
-            "SELECT * FROM document_links WHERE source_id=? ORDER BY start", (document["id"],)
+            "SELECT * FROM document_links WHERE source_id=? ORDER BY `start`", (document["id"],)
         ):
             previous[row["raw"]].append(row)
         db.execute("DELETE FROM document_links WHERE source_id=?", (document["id"],))
@@ -94,7 +73,7 @@ class LinkStore:
             )
             db.execute(
                 """INSERT INTO document_links
-                (id,space_id,source_id,target_id,bound_id,target_name,anchor,label,raw,start,end,excerpt)
+                (id,space_id,source_id,target_id,bound_id,target_name,anchor,label,raw,`start`,`end`,excerpt)
                 VALUES (:id,:space_id,:source_id,:target_id,:bound_id,:target_name,
                         :anchor,:label,:raw,:start,:end,:excerpt)""",
                 params,
@@ -104,7 +83,7 @@ class LinkStore:
     def _set_aliases(db, document_id, aliases):
         db.execute("DELETE FROM document_aliases WHERE document_id=?", (document_id,))
         db.executemany(
-            "INSERT OR IGNORE INTO document_aliases VALUES (?,?)",
+            "INSERT INTO document_aliases VALUES (?,?) ON DUPLICATE KEY UPDATE name=VALUES(name)",
             [(document_id, name) for name in aliases],
         )
 
@@ -119,7 +98,7 @@ class LinkStore:
                 """SELECT l.*,d.title source_title,t.title target_title
                 FROM document_links l JOIN documents d ON d.id=l.source_id
                 LEFT JOIN documents t ON t.id=l.target_id
-                WHERE l.space_id=? AND l.source_id=? ORDER BY l.start LIMIT ?""",
+                WHERE l.space_id=? AND l.source_id=? ORDER BY l.`start` LIMIT ?""",
                 (space_id, document_id, limit + 1),
             ).fetchall()
             outgoing = []
@@ -140,10 +119,10 @@ class LinkStore:
                 outgoing.append(link)
             rows = db.execute(
                 """SELECT l.id,l.source_id,l.anchor,l.label,l.excerpt,
-                    l.start,d.title source_title
+                    l.`start`,d.title source_title
                 FROM document_links l JOIN documents d ON d.id=l.source_id
                 WHERE l.space_id=? AND l.target_id=? AND d.space_id=?
-                ORDER BY d.title,l.start LIMIT ?""",
+                ORDER BY d.title,l.`start` LIMIT ?""",
                 (space_id, document_id, space_id, limit + 1),
             ).fetchall()
             return {
@@ -192,7 +171,7 @@ class LinkStore:
                 truncated |= len(rows) > 500
                 next_frontier = []
                 for row in rows[:500]:
-                    for node in row:
+                    for node in (row["source_id"], row["target_id"]):
                         if node not in distances:
                             if len(distances) >= limit:
                                 truncated = True

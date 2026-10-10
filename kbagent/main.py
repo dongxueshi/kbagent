@@ -3,15 +3,21 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
+import pymysql
 from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from minio.error import S3Error
 from pydantic import BaseModel, Field, field_validator
+from starlette.responses import JSONResponse
+from urllib3.exceptions import HTTPError
 
 from .agent import answer_events, event_error
 from .config import Settings
 from .importer import ImportFailure, extract_text
+from .object_storage import ObjectStorage
 from .store import Store
 
 STATIC = Path(__file__).parent / "static"
@@ -69,19 +75,48 @@ class LinkBinding(BaseModel):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
-    store = Store(settings.data_dir)
+    store = Store(settings)
+    objects = ObjectStorage(settings)
     active_conversations: set[str] = set()
     agent_slots = asyncio.Semaphore(4)
 
     @asynccontextmanager
     async def lifespan(app):
-        store.initialize()
-        yield
+        await asyncio.to_thread(store.initialize)
+        await asyncio.to_thread(objects.initialize)
+
+        async def cleanup():
+            while True:
+                try:
+                    await asyncio.to_thread(objects.collect, store)
+                except Exception as exc:
+                    logger.warning("Storage cleanup deferred (%s)", type(exc).__name__)
+                await asyncio.sleep(60)
+
+        worker = asyncio.create_task(cleanup())
+        try:
+            yield
+        finally:
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
 
     app = FastAPI(title="KB Agent", version="0.1.0", lifespan=lifespan)
+    app.state.objects = objects
     app.state.store = store
     app.state.settings = settings
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    async def storage_error(request, exc):
+        logger.warning("Storage request failed (%s)", type(exc).__name__)
+        return JSONResponse(
+            status_code=503, content={"detail": "存储服务暂时不可用，请检查 MySQL 和 MinIO 配置"}
+        )
+
+    for error in (pymysql.MySQLError, S3Error, HTTPError):
+        app.add_exception_handler(error, storage_error)
 
     def require_space(space_id):
         if not store.space(space_id):
@@ -101,7 +136,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         with store.connection() as db:
             db.execute("SELECT count(*) FROM spaces").fetchone()
-        return {"status": "ok", "database": "ok"}
+        if not objects.health():
+            raise HTTPException(503, "MinIO 存储桶不可用")
+        return {"status": "ok", "database": "ok", "object_storage": "ok"}
 
     @app.get("/api/settings")
     def status():
@@ -109,6 +146,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "mode": "agent" if settings.agent_enabled else "retrieval",
             "model": settings.model if settings.agent_enabled else None,
             "sdk": "deepagents",
+            "database": "mysql",
+            "object_storage": "minio",
             "max_upload_bytes": settings.max_upload_bytes,
         }
 
@@ -130,6 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if active_conversations:
             raise HTTPException(409, "问答正在运行，请完成后再删除知识库")
         store.delete_space(space_id)
+        objects.collect(store)
 
     @app.get("/api/spaces/{space_id}/documents")
     def list_documents(space_id: str):
@@ -178,6 +218,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def delete_document(space_id: str, document_id: str):
         require_document(space_id, document_id)
         store.delete_document(space_id, document_id)
+        objects.collect(store)
 
     @app.get("/api/spaces/{space_id}/documents/{document_id}/export")
     def export_document(space_id: str, document_id: str):
@@ -186,6 +227,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             iter([document["content"]]),
             media_type="text/markdown",
             headers={"Content-Disposition": f'attachment; filename="{document_id}.md"'},
+        )
+
+    @app.get("/api/spaces/{space_id}/documents/{document_id}/original")
+    def original_document(space_id: str, document_id: str):
+        metadata = store.original_file(space_id, document_id)
+        if not metadata:
+            raise HTTPException(404, "文档原件不存在")
+        response = objects.download(metadata["object_key"])
+
+        def stream_original():
+            try:
+                yield from response.stream(64 * 1024)
+            finally:
+                response.close()
+                response.release_conn()
+
+        return StreamingResponse(
+            stream_original(),
+            media_type=metadata["content_type"],
+            headers={
+                "Content-Disposition": "attachment; filename*=UTF-8''"
+                + quote(metadata["filename"], safe=""),
+                "Content-Length": str(metadata["size"]),
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/api/spaces/{space_id}/import", status_code=201)
@@ -202,7 +268,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             title, content = await asyncio.to_thread(extract_text, filename, data)
         except ImportFailure as exc:
             raise HTTPException(422, str(exc)) from exc
-        return await asyncio.to_thread(store.save_document, space_id, title, content, filename)
+        if len(filename) > 255 or len(title) > 200:
+            raise HTTPException(422, "文件名或标题过长")
+        return await asyncio.to_thread(
+            objects.upload, store, space_id, title, content, filename, data
+        )
 
     @app.get("/api/spaces/{space_id}/search")
     def search(space_id: str, q: str = Query(min_length=1, max_length=500)):
