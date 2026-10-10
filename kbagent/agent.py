@@ -27,6 +27,18 @@ PROMPT = """你是 KB Agent 知识库助手，用中文回答。
 回答简洁，必要时列步骤。"""
 
 
+def create_model(settings):
+    return ChatOpenAI(
+        model=settings.model,
+        api_key=settings.api_key,
+        base_url=settings.base_url,
+        temperature=0,
+        timeout=45,
+        max_retries=1,
+        use_responses_api=False,
+    )
+
+
 def build_agent(
     store: Store,
     space_id: str,
@@ -34,6 +46,7 @@ def build_agent(
     sources: dict,
     model=None,
     system_prompt: str = PROMPT,
+    evidence_excerpt_chars: int = 500,
 ):
     def remember(hit: dict):
         if not hit["content"].strip():
@@ -41,7 +54,7 @@ def build_agent(
         sources[hit["document_id"]] = {
             "document_id": hit["document_id"],
             "title": hit["title"],
-            "excerpt": hit["content"][:500],
+            "excerpt": hit["content"][:evidence_excerpt_chars],
             "repository": hit.get("repository"),
         }
 
@@ -144,15 +157,7 @@ def build_agent(
         return json.dumps(hit, ensure_ascii=False)
 
     if model is None:
-        model = ChatOpenAI(
-            model=settings.model,
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-            temperature=0,
-            timeout=45,
-            max_retries=1,
-            use_responses_api=False,
-        )
+        model = create_model(settings)
     retrieval_tools = [
         search_knowledge,
         read_document,
