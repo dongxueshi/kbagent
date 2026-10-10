@@ -104,6 +104,22 @@ TABLES = [
         FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE,
         FOREIGN KEY (snapshot_id) REFERENCES repository_snapshots(id) ON DELETE SET NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS repository_wiki_progress (
+        repository_id VARCHAR(32) PRIMARY KEY, snapshot_id VARCHAR(32) NOT NULL,
+        phase VARCHAR(16) NOT NULL, current_path VARCHAR(512) NOT NULL,
+        total_files INT NOT NULL, completed_files INT NOT NULL,
+        total_chunks INT NOT NULL, completed_chunks INT NOT NULL,
+        total_modules INT NOT NULL, completed_modules INT NOT NULL,
+        cache_hits INT NOT NULL, updated_at VARCHAR(40) NOT NULL,
+        FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS repository_wiki_cache (
+        repository_id VARCHAR(32) NOT NULL, cache_key CHAR(64) NOT NULL,
+        stage VARCHAR(16) NOT NULL, content MEDIUMTEXT NOT NULL,
+        source_ids MEDIUMTEXT NOT NULL, updated_at VARCHAR(40) NOT NULL,
+        PRIMARY KEY (repository_id,cache_key),
+        FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
+    )""",
 ]
 
 

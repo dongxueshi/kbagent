@@ -195,7 +195,7 @@ def normalize_citations(content, evidence):
     return content, reason, sources
 
 
-async def generate_wiki(store, settings, repo, model=None):
+async def generate_overview(store, settings, repo, model=None):
     if model is None and not settings.agent_enabled:
         raise RepositoryFailure("请先在 .env 配置模型服务；结构 Wiki 无需模型")
     scope = RepositoryScope(store, repo, settings.wiki_max_files)
@@ -273,3 +273,9 @@ async def generate_wiki(store, settings, repo, model=None):
         + content
     )
     await asyncio.to_thread(store.save_repository_ai_wiki, repo, content)
+
+
+async def generate_wiki(store, settings, repo, model=None):
+    from .deepwiki import generate_deep_wiki
+
+    await generate_deep_wiki(store, settings, repo, model)

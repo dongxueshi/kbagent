@@ -2,24 +2,27 @@
 
 from uuid import uuid4
 
+from .deepwiki_store import DeepWikiStore
 
-class RepositoryStore:
+
+class RepositoryStore(DeepWikiStore):
     def repositories(self, space_id):
         with self.connection() as db:
-            return [
+            rows = [
                 dict(r)
                 for r in db.execute(
                     "SELECT * FROM repositories WHERE space_id=? ORDER BY created_at,id",
                     (space_id,),
                 )
             ]
+            return [dict(r, wiki_progress=self._wiki_progress(db, r)) for r in rows]
 
     def repository(self, space_id, repository_id):
         with self.connection() as db:
             row = db.execute(
                 "SELECT * FROM repositories WHERE id=? AND space_id=?", (repository_id, space_id)
             ).fetchone()
-            return dict(row) if row else None
+            return dict(row, wiki_progress=self._wiki_progress(db, row)) if row else None
 
     def create_repository(self, space_id, name, kind, source, ref):
         from .store import now
@@ -48,7 +51,7 @@ class RepositoryStore:
             db.execute(f"INSERT INTO repositories ({names}) VALUES ({values})", item)
         return item
 
-    def enqueue_repository(self, space_id, repository_id, job):
+    def enqueue_repository(self, space_id, repository_id, job, force=False):
         from .store import now
 
         column = "sync_status" if job == "sync" else "wiki_status"
@@ -66,6 +69,13 @@ class RepositoryStore:
                 raise ValueError("仓库任务正在执行，请稍后再试")
             if job == "wiki" and not row["snapshot_id"]:
                 raise ValueError("请先同步仓库代码")
+            if job == "wiki" and force:
+                db.execute(
+                    "DELETE FROM repository_wiki_cache WHERE repository_id=?", (repository_id,)
+                )
+                db.execute(
+                    "DELETE FROM repository_wiki_progress WHERE repository_id=?", (repository_id,)
+                )
             error_column = "error" if job == "sync" else "wiki_error"
             db.execute(
                 f"UPDATE repositories SET {column}='queued',{error_column}='',updated_at=? "
@@ -161,7 +171,9 @@ class RepositoryStore:
                 return None
             return self._repository_source(db, document_id)
 
-    def _upsert_repository_document(self, db, repo, kind, path, content, snapshot_id):
+    def _upsert_repository_document(
+        self, db, repo, kind, path, content, snapshot_id, document_id=None
+    ):
         from .store import now
 
         old = db.execute(
@@ -171,7 +183,7 @@ class RepositoryStore:
         ).fetchone()
         title = (repo["name"] + " · " + path)[-200:]
         item = dict(
-            id=old["id"] if old else uuid4().hex,
+            id=old["id"] if old else document_id or uuid4().hex,
             space_id=repo["space_id"],
             title=title,
             content=content,

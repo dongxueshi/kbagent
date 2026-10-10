@@ -170,7 +170,7 @@ def run():
                     page.screenshot(path=OUTPUT / "mobile.png", full_page=True)
                     check_chat(page, url, OUTPUT)
                     check_wiki(page, url, OUTPUT)
-                    check_repositories(page, checkout, OUTPUT)
+                    check_repositories(page, checkout, OUTPUT, settings)
                     assert not errors, errors
                     browser.close()
                     print(

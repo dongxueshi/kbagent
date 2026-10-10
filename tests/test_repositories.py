@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from kbagent.agent import build_agent
 from kbagent.config import Settings
 from kbagent.repositories import GitReader, RepositoryFailure, allowed_file
-from kbagent.repository_wiki import generate_wiki
+from kbagent.repository_wiki import generate_overview
 from tests.test_agent import ScriptedModel, call, sse
 
 
@@ -220,7 +220,9 @@ def test_real_sdk_code_tools_and_ai_wiki(client, base, checkout):
     assert "forceUpgrade" in tools[1].content
     assert evidence[doc]["repository"]["commit_sha"] == repo["commit_sha"]
     # Run the real SDK through the Wiki orchestrator using a deterministic provider fixture.
-    asyncio.run(generate_wiki(client.app.state.store, client.app.state.settings, repo, model=model))
+    asyncio.run(
+        generate_overview(client.app.state.store, client.app.state.settings, repo, model=model)
+    )
     wiki = next(
         f
         for f in client.app.state.store.repository_files(repo["space_id"], repo["id"])
@@ -230,7 +232,9 @@ def test_real_sdk_code_tools_and_ai_wiki(client, base, checkout):
     invalid = ScriptedModel(responses=[AIMessage(content="无依据的架构说明")])
     with pytest.raises(RepositoryFailure):
         asyncio.run(
-            generate_wiki(client.app.state.store, client.app.state.settings, repo, model=invalid)
+            generate_overview(
+                client.app.state.store, client.app.state.settings, repo, model=invalid
+            )
         )
 
 
@@ -440,7 +444,9 @@ def test_wiki_accepts_verified_source_citation_formats(client, base, checkout, s
             AIMessage(content="订单升级条件来自源码。" + citations[style]),
         ]
     )
-    asyncio.run(generate_wiki(client.app.state.store, client.app.state.settings, repo, model=model))
+    asyncio.run(
+        generate_overview(client.app.state.store, client.app.state.settings, repo, model=model)
+    )
     page = next(
         f
         for f in client.app.state.store.repository_files(repo["space_id"], repo["id"])
@@ -460,7 +466,9 @@ def test_wiki_repairs_missing_citations_without_rereading(client, base, checkout
             AIMessage(content=f"订单版本低于2时升级。[资料:{doc}]"),
         ]
     )
-    asyncio.run(generate_wiki(client.app.state.store, client.app.state.settings, repo, model=model))
+    asyncio.run(
+        generate_overview(client.app.state.store, client.app.state.settings, repo, model=model)
+    )
     assert client.app.state.store.repository(repo["space_id"], repo["id"])["wiki_status"] == "ready"
     assert model.i == 0  # Exactly three provider calls; no third generation attempt.
 
@@ -482,7 +490,7 @@ def test_wiki_repair_can_read_code_and_denies_structure_wiki(client, base, check
             AIMessage(content=f"升级实现。[资料:{doc}]"),
         ]
     )
-    asyncio.run(generate_wiki(store, client.app.state.settings, repo, model=model))
+    asyncio.run(generate_overview(store, client.app.state.settings, repo, model=model))
     assert store.repository(repo["space_id"], repo["id"])["wiki_status"] == "ready"
 
 
@@ -500,7 +508,7 @@ def test_wiki_unknown_reference_rejected_after_one_repair(client, base, checkout
         ]
     )
     with pytest.raises(RepositoryFailure, match="未读取的源码"):
-        asyncio.run(generate_wiki(store, client.app.state.settings, repo, model=model))
+        asyncio.run(generate_overview(store, client.app.state.settings, repo, model=model))
     assert not any(
         f["kind"] == "ai_wiki" for f in store.repository_files(repo["space_id"], repo["id"])
     )
@@ -518,5 +526,5 @@ def test_empty_source_reads_are_not_wiki_evidence(client, base, checkout):
     )
     with pytest.raises(RepositoryFailure, match="没有读取到有效源码"):
         asyncio.run(
-            generate_wiki(client.app.state.store, client.app.state.settings, repo, model=model)
+            generate_overview(client.app.state.store, client.app.state.settings, repo, model=model)
         )

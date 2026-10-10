@@ -346,14 +346,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return dict(repo, files=store.repository_files(space_id, repository_id))
 
     @app.post("/api/spaces/{space_id}/repositories/{repository_id}/{job}", status_code=202)
-    def repository_job(space_id: str, repository_id: str, job: str):
+    def repository_job(space_id: str, repository_id: str, job: str, force: bool = False):
         require_repository(space_id, repository_id)
         if job not in {"sync", "wiki"}:
             raise HTTPException(404, "任务不存在")
         if job == "wiki" and not settings.agent_enabled:
             raise HTTPException(422, "请先在 .env 配置模型服务；同步会自动生成结构 Wiki")
         try:
-            store.enqueue_repository(space_id, repository_id, job)
+            store.enqueue_repository(space_id, repository_id, job, force=force)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         return {"status": "queued"}

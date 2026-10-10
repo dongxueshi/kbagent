@@ -25,9 +25,13 @@ class Settings(BaseSettings):
     base_url: str = "https://api.openai.com/v1"
     max_upload_bytes: int = 10 * 1024 * 1024
     agent_timeout: int = Field(default=120, ge=10, le=3600)
+    model_timeout: int = Field(default=45, ge=5, le=3600)
     wiki_max_steps: int = Field(default=80, ge=8, le=256)
     wiki_max_files: int = Field(default=12, ge=1, le=100)
     wiki_source_chars: int = Field(default=24000, ge=4000, le=100000)
+    wiki_batch_files: int = Field(default=8, ge=2, le=100)
+    wiki_summary_chars: int = Field(default=2000, ge=500, le=12000)
+    wiki_task_timeout: int = Field(default=7200, ge=60, le=86400)
 
     gitlab_url: str = ""
     gitlab_username: str = "oauth2"

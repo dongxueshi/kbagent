@@ -6,10 +6,30 @@ async function renderRepositories(version) {
   const repos = await api(base() + '/repositories');
   if (version !== renderVersion || sid !== state.spaceId) return;
   const status = r => ({new:'尚未同步',queued:'等待同步',running:'正在同步',ready:'已同步',error:'同步失败'}[r.sync_status]);
-  main.innerHTML = heading('代码 Wiki', '连接自建 GitLab 或服务器上的 Git 目录，将代码变成可检索、可追溯的知识。', '<button class="button primary" data-action="add-repository">＋ 添加仓库</button>', 'CODE → KNOWLEDGE') + '<div class="repository-grid">' + (repos.map(r => `<section class="panel repository-card"><h2>${esc(r.name)}</h2><p class="repository-path">${esc(r.source)}</p><div class="muted">${r.kind === 'local' ? '本地目录' : 'GitLab'} · ${esc(r.ref || '默认分支')} · ${esc(status(r))}</div><p>${r.file_count} 个文件 · ${r.skipped_count} 个已过滤 ${r.commit_sha ? '· ' + esc(r.commit_sha.slice(0,12)) : ''}</p>${r.error ? `<p class="repository-error">同步错误：${esc(r.error)}</p>` : ''}${r.wiki_error ? `<p class="repository-error">AI Wiki 错误：${esc(r.wiki_error)}</p>` : ''}<p class="muted">${['queued','running'].includes(r.wiki_status) ? 'AI Wiki 生成中…' : r.wiki_status === 'ready' ? 'AI Wiki 已生成' : r.wiki_status === 'error' ? 'AI Wiki 生成失败' + (r.snapshot_id ? ' · 已同步代码仍可检索' : '') : '结构 Wiki（无需模型）'}</p><div class="actions"><button class="button primary" data-repository-open="${r.id}" ${!r.snapshot_id ? 'disabled' : ''}>打开 Wiki</button><button class="button" data-repository-job="sync" data-repository-id="${r.id}" ${repositoryBusy(r) ? 'disabled' : ''}>同步</button><button class="button" data-repository-job="wiki" data-repository-id="${r.id}" ${repositoryBusy(r) || !r.snapshot_id || state.settings.mode !== 'agent' ? 'disabled' : ''}>生成 AI Wiki</button><button class="text-button" data-repository-delete="${r.id}" ${repositoryBusy(r) ? 'disabled' : ''}>删除</button></div></section>`).join('') || empty('添加一个代码仓库', '同步后自动生成结构 Wiki；配置模型后可生成架构与关键流程说明。')) + '</div>';
+  main.innerHTML = heading('代码 Wiki', '连接自建 GitLab 或服务器上的 Git 目录，将代码变成可检索、可追溯的知识。', '<button class="button primary" data-action="add-repository">＋ 添加仓库</button>', 'CODE → KNOWLEDGE') + '<div class="repository-grid">' + (repos.map(r => `<section class="panel repository-card"><h2>${esc(r.name)}</h2><p class="repository-path">${esc(r.source)}</p><div class="muted">${r.kind === 'local' ? '本地目录' : 'GitLab'} · ${esc(r.ref || '默认分支')} · ${esc(status(r))}</div><p>${r.file_count} 个文件 · ${r.skipped_count} 个已过滤 ${r.commit_sha ? '· ' + esc(r.commit_sha.slice(0,12)) : ''}</p>${r.error ? `<p class="repository-error">同步错误：${esc(r.error)}</p>` : ''}${r.wiki_error ? `<p class="repository-error">AI Wiki 错误：${esc(r.wiki_error)}</p>` : ''}${repositoryProgress(r)}<p class="muted">${['queued','running'].includes(r.wiki_status) ? 'AI Wiki 生成中…' : r.wiki_status === 'ready' ? 'AI Wiki 已生成' : r.wiki_status === 'error' ? 'AI Wiki 生成失败' + (r.snapshot_id ? ' · 已同步代码仍可检索' : '') : '结构 Wiki（无需模型）'}</p><div class="actions"><button class="button primary" data-repository-open="${r.id}" ${!r.snapshot_id ? 'disabled' : ''}>打开 Wiki</button><button class="button" data-repository-job="sync" data-repository-id="${r.id}" ${repositoryBusy(r) ? 'disabled' : ''}>同步</button><button class="button" data-repository-job="wiki" data-repository-id="${r.id}" ${repositoryBusy(r) || !r.snapshot_id || state.settings.mode !== 'agent' ? 'disabled' : ''}>${r.wiki_status === 'error' && r.wiki_progress ? '继续生成 AI Wiki' : r.wiki_status === 'ready' ? '更新 AI Wiki' : '生成 AI Wiki'}</button><button class="button" data-repository-job="wiki" data-repository-id="${r.id}" data-repository-force="true" ${repositoryBusy(r) || !r.snapshot_id || state.settings.mode !== 'agent' ? 'disabled' : ''} title="忽略分析缓存，重新调用模型；成功后更新文档">重新分析全部</button><button class="text-button" data-repository-delete="${r.id}" ${repositoryBusy(r) ? 'disabled' : ''}>删除</button></div></section>`).join('') || empty('添加一个代码仓库', '同步后自动生成结构 Wiki；配置模型后可生成文件文档、模块 Wiki 和仓库架构说明。')) + '</div>';
   if (repos.some(repositoryBusy)) repositoryPoll = setTimeout(() => {
     if (state.view === 'repositories' && sid === state.spaceId) renderRepositories(version).catch(e => toast(e.message, true));
   }, 1200);
+}
+function repositoryProgress(r) {
+  const p = r.wiki_progress;
+  if (!p) return '';
+  const phase = {planning:'规划分析范围',files:'分析源码',modules:'生成模块 Wiki',overview:'生成仓库架构',publishing:'保存 Wiki',ready:'生成完成'}[p.phase] || p.phase;
+  return `<div class="repository-progress"><div>${esc(phase)} · 文件 ${p.completed_files}/${p.total_files} · 模块 ${p.completed_modules}/${p.total_modules}</div><progress max="${Math.max(p.total_chunks,1)}" value="${p.completed_chunks}" aria-label="源码分段分析进度"></progress><small class="muted">分段 ${p.completed_chunks}/${p.total_chunks} · 复用 ${p.cache_hits} 个已完成分析</small>${p.current_path ? `<p class="muted repository-path">${esc(p.current_path)}</p>` : ''}</div>`;
+}
+function repositoryWikiDirectory(wiki) {
+  const files = wiki.filter(f => f.path.startsWith('AI 文件 · '));
+  const modules = wiki.filter(f => f.path.startsWith('AI 模块 · '));
+  const other = wiki.filter(f => !files.includes(f) && !modules.includes(f));
+  const buttons = pages => pages.map(f => `<button class="button" data-doc="${f.document_id}">${esc(f.path)}</button>`).join('');
+  const groups = new Map();
+  files.forEach(f => {
+    const path = f.path.slice('AI 文件 · '.length);
+    const parent = path.includes('/') ? path.slice(0,path.lastIndexOf('/')) : '根目录';
+    if (!groups.has(parent)) groups.set(parent,[]);
+    groups.get(parent).push(f);
+  });
+  return `<div class="repository-wiki">${buttons(other)}</div>${modules.length ? `<h4>模块文档</h4><div class="repository-wiki">${buttons(modules)}</div>` : ''}${files.length ? '<h4>文件文档</h4>' : ''}${[...groups].map(([name,pages]) => `<details class="repository-directory"><summary>${esc(name)} · ${pages.length} 个文件</summary><div class="repository-wiki">${buttons(pages)}</div></details>`).join('')}`;
 }
 function repositoryBusy(r) { return [r.sync_status,r.wiki_status].some(s => ['queued','running'].includes(s)); }
 async function addRepositoryDialog() {
@@ -22,7 +42,7 @@ async function openRepository(id) {
   if (sid !== state.spaceId) return;
   const wiki = repo.files.filter(f => f.kind !== 'code');
   const files = repo.files.filter(f => f.kind === 'code');
-  showDialog(`${dialogHead(repo.name + ' · 代码 Wiki')}<div class="dialog-body"><p class="muted repository-path">${esc(repo.ref || '默认分支')} · ${esc(repo.commit_sha)}</p><h3>Wiki 页面</h3><div class="repository-wiki">${wiki.map(f => `<button class="button" data-doc="${f.document_id}">${esc(f.path)}</button>`).join('')}</div><h3>源码文件</h3><input id="repository-file-filter" class="repository-filter" placeholder="按文件路径筛选" aria-label="按文件路径筛选"><div class="repository-file-list">${files.map(f => `<button class="doc-row" data-repository-code="${esc(JSON.stringify({repository_id:id,path:f.path,snapshot_id:f.snapshot_id}))}"><strong>${esc(f.path)}</strong><small>${f.line_count} 行</small></button>`).join('')}</div></div>`, true);
+  showDialog(`${dialogHead(repo.name + ' · 代码 Wiki')}<div class="dialog-body"><p class="muted repository-path">${esc(repo.ref || '默认分支')} · ${esc(repo.commit_sha)}</p><h3>Wiki 页面</h3>${repositoryWikiDirectory(wiki)}<h3>源码文件</h3><input id="repository-file-filter" class="repository-filter" placeholder="按文件路径筛选" aria-label="按文件路径筛选"><div class="repository-file-list">${files.map(f => `<button class="doc-row" data-repository-code="${esc(JSON.stringify({repository_id:id,path:f.path,snapshot_id:f.snapshot_id}))}"><strong>${esc(f.path)}</strong><small>${f.line_count} 行</small></button>`).join('')}</div></div>`, true);
   $('#repository-file-filter').addEventListener('input', event => {
     const query = event.target.value.toLowerCase();
     document.querySelectorAll('[data-repository-code]').forEach(el => {el.hidden = !JSON.parse(el.dataset.repositoryCode).path.toLowerCase().includes(query);});
@@ -47,7 +67,7 @@ document.addEventListener('click', async event => {
     if (el.dataset.repositoryOpen) await openRepository(el.dataset.repositoryOpen);
     if (el.dataset.repositoryCode) await viewSource(JSON.parse(el.dataset.repositoryCode));
     if (el.dataset.repositoryJob) {
-      await api(base() + '/repositories/' + el.dataset.repositoryId + '/' + el.dataset.repositoryJob,{method:'POST'});
+      await api(base() + '/repositories/' + el.dataset.repositoryId + '/' + el.dataset.repositoryJob + (el.dataset.repositoryForce ? '?force=true' : ''),{method:'POST'});
       await render();
     }
     if (el.dataset.repositoryDelete && confirm('删除此仓库的代码、Wiki 和所有历史快照？')) {

@@ -46,7 +46,7 @@ def repository_error(exc, job, timeout):
     if isinstance(exc, openai.RateLimitError):
         return "模型服务限流或额度不足（HTTP 429），请检查配额并稍后重试"
     if isinstance(exc, openai.APITimeoutError):
-        return "模型单次请求超时，请检查模型服务响应速度或缩小分析范围"
+        return "模型单次请求超时，请检查响应速度或在 .env 调整 KBAGENT_MODEL_TIMEOUT"
     if isinstance(exc, openai.APIConnectionError):
         return "无法连接模型服务，请检查 KBAGENT_BASE_URL、网络与 TLS 证书"
     if isinstance(exc, openai.BadRequestError):
@@ -54,7 +54,7 @@ def repository_error(exc, job, timeout):
         error = body.get("error", body)
         code = error.get("code") if isinstance(error, dict) else None
         if code == "context_length_exceeded":
-            return "模型上下文长度超限，请使用更大上下文的模型或减少仓库导入文件"
+            return "模型上下文长度超限，请使用更大上下文模型或减小 KBAGENT_WIKI_SOURCE_CHARS"
         return "模型请求被拒绝（HTTP 400），请检查模型名称、上下文长度及工具调用支持"
     if isinstance(exc, openai.APIStatusError):
         return "模型服务返回错误，请检查服务状态并稍后重试"

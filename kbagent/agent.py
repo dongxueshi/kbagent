@@ -33,7 +33,7 @@ def create_model(settings):
         api_key=settings.api_key,
         base_url=settings.base_url,
         temperature=0,
-        timeout=45,
+        timeout=settings.model_timeout,
         max_retries=1,
         use_responses_api=False,
     )

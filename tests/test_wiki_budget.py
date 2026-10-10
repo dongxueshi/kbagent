@@ -6,7 +6,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from kbagent.repositories import RepositoryFailure
 from kbagent.repository_wiki import (
-    generate_wiki,
+    generate_overview,
     prioritized_files,
     synthesize_wiki,
 )
@@ -52,7 +52,7 @@ def test_real_sdk_step_budget_finishes_from_actual_source(client, base, checkout
     settings = client.app.state.settings
     settings.wiki_max_steps = 8
     model = LoopingModel(document_id=doc, responses=[AIMessage(content="unused")])
-    asyncio.run(generate_wiki(client.app.state.store, settings, repo, model))
+    asyncio.run(generate_overview(client.app.state.store, settings, repo, model))
     assert model.research_calls >= 2 and model.synthesis_calls == 1
     wiki = next(
         f
@@ -75,7 +75,7 @@ def test_file_budget_finishes_without_reading_every_file(client, base, checkout)
             AIMessage(content=f"基于已读文件整理。[资料:{docs[0]}]"),
         ]
     )
-    asyncio.run(generate_wiki(client.app.state.store, settings, repo, model))
+    asyncio.run(generate_overview(client.app.state.store, settings, repo, model))
     wiki = next(
         f
         for f in client.app.state.store.repository_files(repo["space_id"], repo["id"])
@@ -103,7 +103,7 @@ def test_exhausted_research_never_saves_ungrounded_or_looping_synthesis(
         no_evidence=mode == "no_evidence",
     )
     with pytest.raises(RepositoryFailure):
-        asyncio.run(generate_wiki(client.app.state.store, settings, repo, model))
+        asyncio.run(generate_overview(client.app.state.store, settings, repo, model))
     assert model.synthesis_calls == (0 if mode == "no_evidence" else 1)
     assert not any(
         f["kind"] == "ai_wiki"
@@ -167,7 +167,7 @@ def test_research_timeout_reserves_time_for_verified_synthesis(client, base, che
     # A short test deadline exercises cancellation and the reserved synthesis phase.
     settings.agent_timeout = 0.2
     model = ScriptedModel(responses=[AIMessage(content=f"升级判断来自源码。[资料:{doc_id}]")])
-    asyncio.run(generate_wiki(store, settings, repo, model))
+    asyncio.run(generate_overview(store, settings, repo, model))
     wiki = next(
         f for f in store.repository_files(repo["space_id"], repo["id"]) if f["kind"] == "ai_wiki"
     )

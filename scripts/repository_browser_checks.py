@@ -1,9 +1,33 @@
 """Real browser coverage for the repository management and source citation workflow."""
 
+import asyncio
+import re
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from playwright.sync_api import expect
 
+from kbagent.deepwiki import generate_deep_wiki
+from kbagent.store import Store
 
-def check_repositories(page, checkout, output):
+
+class BrowserWikiModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        prompt = next(m.content for m in reversed(messages) if isinstance(m, HumanMessage))
+        ids = list(dict.fromkeys(re.findall(r"\[资料:([a-f0-9]{32})\]", prompt)))
+        result = AIMessage(
+            content="订单升级条件由版本字段决定。" + "".join(f"[资料:{cid}]" for cid in ids)
+        )
+        return ChatResult(generations=[ChatGeneration(message=result)])
+
+
+def check_repositories(page, checkout, output, settings):
     if page.locator("#dialog").is_visible():
         page.get_by_role("button", name="关闭", exact=True).click()
     page.set_viewport_size({"width": 1440, "height": 834})
@@ -37,14 +61,43 @@ def check_repositories(page, checkout, output):
     citation.click()
     expect(page.locator(".source-code")).to_contain_text("forceUpgrade")
     page.get_by_role("button", name="关闭", exact=True).click()
+    # Publish with a deterministic provider through the real SDK, then read it in Chromium.
+    store = Store(settings)
+    repo = next(r for s in store.spaces() for r in store.repositories(s["id"]))
+    # Playwright's synchronous API already owns an event loop on this thread.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(
+            asyncio.run,
+            generate_deep_wiki(
+                store, settings, repo, BrowserWikiModel(responses=[AIMessage(content="unused")])
+            ),
+        ).result()
     page.locator('nav [data-view="repositories"]').click()
+    expect(page.locator(".repository-progress")).to_contain_text("生成完成")
+    expect(page.locator(".repository-progress")).to_contain_text("文件 1/1")
+    page.get_by_role("button", name="打开 Wiki", exact=True).click()
+    page.get_by_role("button", name="AI 架构与关键流程", exact=True).click()
+    expect(page.locator("#document-preview")).to_contain_text("已处理 1 / 1")
+    page.locator("#document-preview [data-wiki-link]").filter(has_text="AI 模块 · .").click()
+    expect(page.locator("#document-preview")).to_contain_text("文件文档")
+    page.locator("#document-preview [data-wiki-link]").filter(
+        has_text="AI 文件 · orders.py"
+    ).click()
+    expect(page.locator("#document-preview")).to_contain_text("分段 1")
+    with page.expect_download() as exported:
+        page.get_by_role("link", name="↓ 导出 Markdown").click()
+    assert "订单升级条件" in Path(exported.value.path()).read_text()
+    page.screenshot(path=output / "deepwiki-file.png", full_page=True)
+    page.get_by_role("button", name="关闭", exact=True).click()
     for width in [390, 320]:
         page.set_viewport_size({"width": width, "height": 844})
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="打开 Wiki", exact=True).click()
         page.locator("[data-repository-code]").first.click()
+        expect(page.locator(".source-code")).to_contain_text("forceUpgrade")
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="关闭", exact=True).click()
+        expect(page.locator("#dialog")).not_to_be_visible()
 
     # Simulate separate historical sync and current AI failures, without a model request.
     def failed_status(route):
@@ -67,4 +120,6 @@ def check_repositories(page, checkout, output):
     finally:
         page.unroute("**/api/spaces/*/repositories", failed_status)
     page.screenshot(path=output / "repository-mobile.png", full_page=True)
-    print("Repository browser checks passed: add, sync, Wiki, source lines, citations, mobile.")
+    print(
+        "Repository browser checks passed: sync, full Wiki, progress, navigation, export, mobile."
+    )
