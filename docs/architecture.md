@@ -23,6 +23,8 @@ flowchart LR
 
 ## 数据与索引
 
+支持 MySQL 5.7 和 8.x。表使用 InnoDB、utf8mb4_bin 和 DYNAMIC 行格式，支持长对象键与中文词项的索引；MySQL 5.7 需保留 InnoDB large-prefix 支持。检索 SQL 不依赖窗口函数或其他 MySQL 8 专属语法。
+
 `spaces → documents → chunks` 保存知识库、原文与片段。分片长度 900 字符、重叠 120 字符；中文通过 jieba 搜索分词，使用 词项索引 BM25 排序，标题权重为正文的三倍。不依赖嵌入模型或向量数据库。短中文词不受 MySQL FULLTEXT 的词长或默认停用词限制。
 
 新建、修改、删除文档在同一 MySQL InnoDB 事务中维护片段、词项表和关联，避免孤立或陈旧索引。连接按操作创建并关闭，不在线程间共享。检索结果返回片段、文档 ID 与标题，不把 BM25 排名当作概率或准确率。

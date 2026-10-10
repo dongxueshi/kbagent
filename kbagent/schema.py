@@ -1,4 +1,13 @@
-"""MySQL 8 InnoDB schema. DDL is explicit; application writes use transactions."""
+"""MySQL 5.7+ InnoDB schema. DDL is explicit; application writes use transactions."""
+
+import re
+
+
+def require_supported_version(version):
+    match = re.match(r"^(\d+)\.(\d+)(?:\.|$)", version)
+    if "mariadb" in version.lower() or not match or tuple(map(int, match.groups())) < (5, 7):
+        raise RuntimeError(f"MySQL 5.7 or newer is required (server version: {version})")
+
 
 TABLES = [
     """CREATE TABLE IF NOT EXISTS spaces (
@@ -74,7 +83,8 @@ TABLES = [
 
 def initialize_schema(db):
     version = db.execute("SELECT VERSION() version").fetchone()["version"]
-    if "MariaDB" in version or int(version.split(".")[0]) < 8:
-        raise RuntimeError("MySQL 8.0 or newer is required")
+    require_supported_version(version)
     for ddl in TABLES:
-        db.execute(ddl + " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin")
+        db.execute(
+            ddl + " ENGINE=InnoDB ROW_FORMAT=DYNAMIC DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
+        )

@@ -3,6 +3,11 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mysql: ["5.7.44", "8.4"]
+    env:
+      COMPOSE_FILE: ${{ github.workspace }}/compose.yaml:${{ runner.temp }}/mysql-test.yaml
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -13,5 +18,10 @@ jobs:
         with:
           node-version: '24'
       - run: UV_CACHE_DIR="$RUNNER_TEMP/uv" bash scripts/setup.sh
+      - name: Select MySQL test version
+        env:
+          MYSQL_TEST_VERSION: ${{ matrix.mysql }}
+        run: |
+          printf 'services:\n  mysql:\n    image: mysql:%s\n' "$MYSQL_TEST_VERSION" > "$RUNNER_TEMP/mysql-test.yaml"
       - run: make test-services
       - run: make test lint

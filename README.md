@@ -19,7 +19,7 @@
 
 ## 本地启动
 
-要求 Python **3.12 或 3.13**、[uv](https://docs.astral.sh/uv/getting-started/installation/)，以及 Docker / Docker Compose（或已有的 MySQL 8 和 MinIO 服务）。Node 仅用于 JavaScript 语法检查。
+要求 Python **3.12 或 3.13**、[uv](https://docs.astral.sh/uv/getting-started/installation/)，以及 Docker / Docker Compose（或已有的 MySQL 5.7+ 和 MinIO 服务）。Node 仅用于 JavaScript 语法检查。
 
 ```bash
 bash scripts/setup.sh
@@ -49,7 +49,7 @@ KBAGENT_MINIO_BUCKET=kbagent
 KBAGENT_MINIO_SECURE=false
 ```
 
-MinIO endpoint 使用 `主机:端口`，不包含 `http://` 或路径。HTTPS 服务设置 `KBAGENT_MINIO_SECURE=true`；证书会正常验证。MySQL TLS 可通过 `KBAGENT_MYSQL_SSL_CA` 指定 CA 文件，并验证主机名。`KBAGENT_MINIO_REGION` 默认 `us-east-1`；默认自动创建 bucket，可用 `KBAGENT_MINIO_CREATE_BUCKET=false` 改为只使用已有 bucket。MySQL 数据库必须预先存在，账号需有建表与数据读写权限；本地 Compose 自动初始化。
+MinIO endpoint 使用 `主机:端口`，不包含 `http://` 或路径。HTTPS 服务设置 `KBAGENT_MINIO_SECURE=true`；证书会正常验证。MySQL TLS 可通过 `KBAGENT_MYSQL_SSL_CA` 指定 CA 文件，并验证主机名。`KBAGENT_MINIO_REGION` 默认 `us-east-1`；默认自动创建 bucket，可用 `KBAGENT_MINIO_CREATE_BUCKET=false` 改为只使用已有 bucket。已有 MySQL 5.7 可直接使用，无需升级到 8.0；本地 Compose 默认仍为 8.4。MySQL 数据库必须预先存在，账号需有建表与数据读写权限；本地 Compose 自动初始化。
 
 本地 MinIO 控制台为 `http://localhost:9001`，使用 `.env` 中的访问密钥登录。`MYSQL_ROOT_PASSWORD` 仅用于 Compose 初始化和独立测试库，不用于应用连接。首次初始化后修改 `.env` 中的数据库密码不会自动修改已有 MySQL 用户，请先在服务中更新对应账号。MySQL 和 MinIO 使用 Docker 命名卷，停止容器保留数据；备份需同时保留数据库和 bucket，并使两份备份保持一致。
 
