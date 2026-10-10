@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import traceback
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
@@ -324,8 +325,11 @@ class RepositoryService:
                 repo, commit, files, skipped, snapshot, structure_wiki
             )
         except Exception:
-            self.store.abandon_object(snapshot["object_key"])
-            self.objects.collect(self.store)
+            try:
+                self.store.abandon_object(snapshot["object_key"])
+                self.objects.collect(self.store)
+            except Exception as cleanup_error:
+                logger.warning("Repository cleanup deferred (%s)", type(cleanup_error).__name__)
             raise
 
     def source(self, space_id, repository_id, path, snapshot_id=None, start_line=1, end_line=200):
@@ -375,10 +379,20 @@ class RepositoryService:
 
                     await generate_wiki(self.store, self.settings, repo)
             except Exception as exc:
-                message = (
-                    str(exc)
-                    if isinstance(exc, RepositoryFailure)
-                    else "仓库任务失败，请检查 Git、MySQL、MinIO 或模型配置后重试"
+                from .repository_errors import repository_error
+
+                message = repository_error(exc, repo["job"], self.settings.agent_timeout)
+                frames = traceback.extract_tb(exc.__traceback__)
+                location = " > ".join(
+                    f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames
+                )
+                # Exception strings, bodies, arguments and locals can expose credentials.
+                logger.warning(
+                    "Repository job failed repository=%s job=%s exception=%s at=%s",
+                    repo["id"],
+                    repo["job"],
+                    type(exc).__name__,
+                    location,
                 )
                 try:
                     await asyncio.to_thread(

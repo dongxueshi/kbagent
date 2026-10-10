@@ -66,8 +66,10 @@ class RepositoryStore:
                 raise ValueError("仓库任务正在执行，请稍后再试")
             if job == "wiki" and not row["snapshot_id"]:
                 raise ValueError("请先同步仓库代码")
+            error_column = "error" if job == "sync" else "wiki_error"
             db.execute(
-                f"UPDATE repositories SET {column}='queued',updated_at=? WHERE id=?",
+                f"UPDATE repositories SET {column}='queued',{error_column}='',updated_at=? "
+                "WHERE id=?",
                 (now(), repository_id),
             )
 

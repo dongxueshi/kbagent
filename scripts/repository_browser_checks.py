@@ -45,5 +45,26 @@ def check_repositories(page, checkout, output):
         page.locator("[data-repository-code]").first.click()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="关闭", exact=True).click()
+
+    # Simulate separate historical sync and current AI failures, without a model request.
+    def failed_status(route):
+        response = route.fetch()
+        repos = response.json()
+        for repo in repos:
+            repo["wiki_status"] = "error"
+            repo["wiki_error"] = "AI Wiki 生成超时（任务上限 120 秒）"
+            repo["error"] = "MySQL 连接中断"
+        route.fulfill(response=response, json=repos)
+
+    page.route("**/api/spaces/*/repositories", failed_status)
+    try:
+        page.locator('nav [data-view="chat"]').click()
+        page.locator('nav [data-view="repositories"]').click()
+        expect(page.locator(".repository-error").filter(has_text="AI Wiki 错误：")).to_be_visible()
+        expect(page.locator(".repository-error").filter(has_text="同步错误：")).to_be_visible()
+        expect(page.get_by_text("AI Wiki 生成失败 · 已同步代码仍可检索")).to_be_visible()
+        expect(page.get_by_role("button", name="打开 Wiki", exact=True)).to_be_enabled()
+    finally:
+        page.unroute("**/api/spaces/*/repositories", failed_status)
     page.screenshot(path=output / "repository-mobile.png", full_page=True)
     print("Repository browser checks passed: add, sync, Wiki, source lines, citations, mobile.")
