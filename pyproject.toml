@@ -1,0 +1,35 @@
+[project]
+name = "kbagent"
+version = "0.1.0"
+description = "Local knowledge workspace powered by DeepAgents"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "pydantic-settings>=2.8,<3",
+  "python-multipart>=0.0.20,<1",
+  "deepagents==0.7.23",
+  "langchain-openai>=1.0,<2",
+  "jieba>=0.42.1,<1",
+  "pypdf>=5,<7",
+  "python-docx>=1.1,<2",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.11,<1", "playwright>=1.50,<2"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kbagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>KB Agent · 知识工作空间</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="KB Agent 首页"><span class="brand-mark">k<span>✦</span></span><div>KB Agent<small>知识，让每个答案有据可循</small></div></a>
+      <div class="workspace-label">工作空间 <span class="tag">LOCAL</span></div>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-view="overview"><span>◈</span>工作台</button>
+        <button class="nav-item" data-view="documents"><span>▤</span>知识文档<span id="nav-count" class="nav-count">0</span></button>
+        <button class="nav-item" data-view="chat"><span>✧</span>智能问答</button>
+        <button class="nav-item" data-view="settings"><span>⚙</span>模型与设置</button>
+      </nav>
+      <div class="space-label">我的知识库 <button id="add-space" class="icon-button" aria-label="新建知识库">＋</button></div>
+      <div id="space-list" class="space-list"></div>
+      <div class="sidebar-bottom"><div class="local-indicator"><span></span>本地工作空间</div><small>你的知识，保存在你的设备上</small></div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar"><div class="breadcrumb">工作空间 <span>/</span> <strong id="breadcrumb">工作台</strong></div><div class="topbar-right"><span id="mode-badge" class="mode-badge">正在连接</span><a class="api-link" href="/docs" target="_blank" rel="noopener">API 文档 ↗</a><span class="avatar" title="本地用户">本</span></div></header>
+      <main id="main" tabindex="-1"><div class="loading">正在加载工作空间…</div></main>
+      <footer>KB Agent <span>·</span> Powered by DeepAgents <span>·</span> 本地开发版</footer>
+    </div>
+  </div>
+  <dialog id="dialog"><div id="dialog-content"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <input id="file-input" type="file" accept=".md,.txt,.pdf,.docx" hidden>
+</body>
+</html>
