@@ -8,7 +8,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from kbagent import agent
 from kbagent.config import Settings
-from kbagent.deepwiki import UnitScope, generate_deep_wiki, split_source
+from kbagent.deepwiki import UnitScope, WikiPipeline, generate_deep_wiki, split_source
 from kbagent.repositories import RepositoryFailure
 from tests.test_agent import ScriptedModel, call
 from tests.test_repositories import add_local, checkout, git, wait_repo
@@ -142,11 +142,91 @@ def test_invalid_or_oversized_result_preserves_published_pages(client, base, che
     asyncio.run(generate_deep_wiki(store, settings, repo, model()))
     original = pages(client, repo)
     settings.model = "changed-model-invalidates-cache"
-    for fixture in [model(unknown_citation=True), model(extra="x" * 2100)]:
+    for fixture in [model(unknown_citation=True), model(extra="x" * 13000)]:
         with pytest.raises(RepositoryFailure, match="校验失败"):
             asyncio.run(generate_deep_wiki(store, settings, repo, fixture))
         assert fixture.calls == 2  # One bounded graph call plus one tool-free repair.
         assert pages(client, repo) == original
+
+
+def test_long_valid_outputs_fit_merge_budget_and_are_reused_without_truncation(
+    client, base, checkout
+):
+    repo = add_local(client, base, checkout)
+    store, settings = client.app.state.store, client.app.state.settings
+    fixture = model(extra="详细说明" * 800 + "TAIL_MUST_SURVIVE")
+    asyncio.run(generate_deep_wiki(store, settings, repo, fixture))
+    assert fixture.calls == 6  # No unnecessary repairs at the old 2000-character boundary.
+    result = pages(client, repo)
+    assert all(
+        "TAIL_MUST_SURVIVE" in d["content"] for p, d in result.items() if p != "AI 静态依赖关系"
+    )
+    repeated = model(fail_at=1)
+    asyncio.run(generate_deep_wiki(store, settings, repo, repeated))
+    assert repeated.calls == 0  # Larger checked summaries also survive retry/reload.
+
+
+def test_oversized_draft_is_compressed_with_original_citations(client, base, checkout):
+    class CompressingModel(WikiModel):
+        compressed: int = 0
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            prompt = next(m.content for m in reversed(messages) if isinstance(m, HumanMessage))
+            if "请压缩以下已生成正文" not in prompt:
+                return super()._generate(messages, stop, run_manager, **kwargs)
+            self.calls += 1
+            self.compressed += 1
+            assert "DRAFT_TAIL" in prompt  # The failed draft, rather than raw source, is supplied.
+            assert "实际 " in prompt and "硬上限 11300" in prompt
+            ids = list(dict.fromkeys(re.findall(r"\[资料:([a-f0-9]{32})\]", prompt)))
+            result = AIMessage(
+                content="压缩后保留关键实现。" + "".join(f"[资料:{cid}]" for cid in ids)
+            )
+            return ChatResult(generations=[ChatGeneration(message=result)])
+
+    repo = add_local(client, base, checkout)
+    fixture = CompressingModel(
+        responses=[AIMessage(content="unused")], extra="详细说明" * 3500 + "DRAFT_TAIL"
+    )
+    asyncio.run(
+        generate_deep_wiki(client.app.state.store, client.app.state.settings, repo, fixture)
+    )
+    assert fixture.compressed == 6
+    assert "压缩后保留关键实现" in pages(client, repo)["AI 架构与关键流程"]["content"]
+
+
+def test_small_context_keeps_hard_limit_and_actionable_error(client, base, checkout):
+    repo = add_local(client, base, checkout)
+    settings = client.app.state.settings
+    settings.wiki_source_chars = 4000
+    with pytest.raises(RepositoryFailure, match=r"实际 .*硬上限 1300.*KBAGENT_WIKI_SOURCE_CHARS"):
+        asyncio.run(
+            generate_deep_wiki(client.app.state.store, settings, repo, model(extra="x" * 2100))
+        )
+    assert not pages(client, repo)
+
+
+def test_compression_cannot_add_citations_absent_from_supplied_draft(client, base, checkout):
+    repo = add_local(client, base, checkout)
+    store = client.app.state.store
+    ids = [f["document_id"] for f in repo["files"] if f["kind"] == "code"][:2]
+    evidence = {}
+    for cid in ids:
+        doc = store.document(repo["space_id"], cid)
+        evidence[cid] = dict(excerpt=doc["content"], repository=doc["repository"])
+    fixture = ScriptedModel(
+        responses=[
+            AIMessage(content="长正文" + "x" * 13000 + f"[资料:{ids[0]}]"),
+            AIMessage(content=f"压缩时补造原正文没有的引用。[资料:{ids[1]}]"),
+        ]
+    )
+    pipeline = WikiPipeline(store, client.app.state.settings, repo, fixture)
+    with pytest.raises(RepositoryFailure, match="未读取的源码"):
+        asyncio.run(
+            pipeline.unit(
+                "summary", "test", "\n".join(f"[资料:{cid}] 已校验摘要" for cid in ids), evidence
+            )
+        )
 
 
 def test_step_budget_fallback_per_unit_finishes_all_files(client, base, checkout):

@@ -114,6 +114,9 @@ class WikiPipeline:
         )
         # Summary inputs must fit even when the context budget is small.
         self.summary_limit = min(settings.wiki_summary_chars, settings.wiki_source_chars // 4)
+        # The target is guidance, not a brittle hard cutoff. Reserve space for two
+        # child summaries and long path headers so every merge can still make progress.
+        self.output_limit = min(12000, (settings.wiki_source_chars - 1400) // 2)
 
     async def update(self, **values):
         if "current_path" in values:
@@ -128,7 +131,7 @@ class WikiPipeline:
         cached = await asyncio.to_thread(self.store.wiki_checkpoint, self.repo, key)
         if cached and set(cached["source_ids"]) <= evidence.keys():
             content, reason, _ = normalize_citations(cached["content"], evidence)
-            if reason is None and len(content) <= self.summary_limit:
+            if reason is None and len(content) <= self.output_limit:
                 self.progress["cache_hits"] += 1
                 return dict(
                     name=name, content=content, sources=set(cached["source_ids"]), cache_key=key
@@ -137,7 +140,8 @@ class WikiPipeline:
             raise RepositoryFailure("AI Wiki 单元超过上下文预算，请调整分段配置")
         prompt = (
             f"阶段：{stage}\n单元：{name}\n"
-            f"正文最多 {self.summary_limit} 字符（包括引用）。不要调用工具遍历仓库。\n"
+            f"正文目标 {self.summary_limit} 字符，硬上限 {self.output_limit} 字符（包括引用）。"
+            "不要调用工具遍历仓库。\n"
             "每项实现结论引用下列资料中的 ID，未证明的细节写待确认。\n\n" + body
         )
         original = dict(evidence)
@@ -161,25 +165,40 @@ class WikiPipeline:
                     content, reason, _ = normalize_citations(text_content(answer), original)
                     if getattr(answer, "tool_calls", None):
                         reason = "整理结果仍请求调用工具"
-                    elif len(content) > self.summary_limit:
-                        reason = "正文超过篇幅预算"
+                    elif reason is None and len(content) > self.output_limit:
+                        reason = self.length_error(content)
             except (GraphRecursionError, TimeoutError):
                 content, reason = "", "研究达到步骤或时间预算"
             if reason:
-                # Retain the original source bundle; never silently crop source or report.
+                # Compress the actual draft instead of generating another long response
+                # from the same source. Oversized/invalid drafts fall back to the bounded
+                # original bundle; neither sources nor reports are silently cropped.
+                repair_prompt, repair_evidence = prompt, original
+                _, citation_error, _ = normalize_citations(content, original)
+                if (
+                    citation_error is None
+                    and self.output_limit < len(content) <= self.settings.wiki_source_chars - 1200
+                ):
+                    repair_evidence = {cid: original[cid] for cid in CITATION.findall(content)}
+                    repair_prompt = (
+                        f"请压缩以下已生成正文，目标 {self.summary_limit} 字符，"
+                        f"硬上限 {self.output_limit} 字符（包括引用）。"
+                        "合并重复说明，保留关键职责、接口、条件和有效源码引用。"
+                        "只引用下列正文中的文档 ID，不扩展未提供的实现细节。\n\n" + content
+                    )
                 result = await self.model.ainvoke(
                     [
                         SystemMessage(UNIT_PROMPT + "只整理已给定源码或摘要，不再调用任何工具。"),
                         HumanMessage(
-                            prompt + f"\n上一轮失败：{reason}。请直接返回合法的简明正文。"
+                            repair_prompt + f"\n上一轮失败：{reason}。请直接返回合法的简明正文。"
                         ),
                     ]
                 )
-                content, reason, _ = normalize_citations(text_content(result), original)
+                content, reason, _ = normalize_citations(text_content(result), repair_evidence)
                 if getattr(result, "tool_calls", None):
                     reason = "整理结果仍请求调用工具"
-                elif len(content) > self.summary_limit:
-                    reason = "正文超过篇幅预算"
+                elif reason is None and len(content) > self.output_limit:
+                    reason = self.length_error(content)
             if reason:
                 raise RepositoryFailure(
                     f"AI Wiki 单元引用/篇幅校验失败：{reason}。已完成部分可续跑"
@@ -189,6 +208,13 @@ class WikiPipeline:
             self.store.save_wiki_checkpoint, self.repo, key, stage, content, sorted(sources)
         )
         return dict(name=name, content=content, sources=sources, cache_key=key)
+
+    def length_error(self, content):
+        return (
+            f"正文超过篇幅预算（实际 {len(content)} 字符，硬上限 {self.output_limit} 字符，"
+            f"目标 {self.summary_limit} 字符）；可增大 KBAGENT_WIKI_SOURCE_CHARS，"
+            "需适配模型上下文；增加超时或图步骤不能解决篇幅超限"
+        )
 
     async def reduce(self, name, entries, evidence):
         """Bounded merge tree consumes every child; no tail truncation for big modules."""
